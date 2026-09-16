@@ -2,3 +2,6 @@
 # core.autocrlf=true in its system config, and a CRLF working tree breaks the
 # pinned shellcheck run (SC1017) and any test that compares file bytes.
 * text=auto eol=lf
+
+# Bash parses shell scripts with LF line endings on every supported platform.
+*.sh text eol=lf
