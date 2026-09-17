@@ -423,11 +423,14 @@ This section is the single owner of the canonical schema and its per-field seman
 
 ```json
 {
+  "default_when": "<optional natural-language description of the work no rule covers>",
   "rules": [
     {
       "when": "<natural-language condition describing a kind of task>",
+      "approval": "captain",
+      "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>" }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
@@ -442,6 +445,11 @@ Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
+`default_when`, rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+`default_when` is the wording Jev sees for "no listed rule applies"; when absent the tool supplies a generic one.
+`approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
+A rule `floor` names the quota-axi `provider` and `scope` whose `effectivePercentRemaining` must be at least `min_percent` for the rule's profiles to apply; below it the tool resolves among `default` instead.
+A profile `provider` names the quota-axi provider family whose rows apply to that profile, for harnesses that serve several families (`pi`, `omp`, `opencode`); a profile `floor` makes that one candidate ineligible below `min_percent` on the named scope.
 `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
 Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
 An omitted model or effort means the selected harness uses its own default for that axis.
@@ -452,9 +460,32 @@ Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPA
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+Malformed JSON, an empty or malformed rule/default array, an unverified harness, an effort value unsupported by that harness, or a malformed `default_when`, `approval`, `floor`, or `provider` declaration is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+## Typed dispatch resolution (.env TYPESAFE_API_KEY)
+
+`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
+It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
+This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
+
+```sh
+bin/fm-dispatch-resolve.sh --status                                   # off | on (key source, model, floor)
+bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON block on stdout
+bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name> --json
+```
+
+When on, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus `default_when`; the model never sees quota, catalogs, `why`, `use`, or approvals.
+Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, the rows of one `quota-axi --json` snapshot (or a `--quota` file), and the `spendPriority` argmax over the eligible candidates, with every candidate printed beside its evidence or the reason it was not rankable.
+The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, nothing rankable, or a genuine tie), or `error` (API, network, response, or quota-axi failure), and every one of them exits 0.
+Only a usage or configuration error exits 2: an unreadable brief or rules file, a malformed rules file, or missing `jq` or `curl`, each reported and never selected around.
+The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
+
+The key lives in one shell variable and reaches `curl` as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
+`TYPESAFE_BASE_URL` (default `https://api.typesafe.ai`), `FM_TYPESAFE_MODEL` (default `jev-latest`), `FM_DISPATCH_RESOLVE_FLOOR` (confidence floor, default 0.6), and `FM_DISPATCH_RESOLVE_TIMEOUT` (request timeout in seconds, default 5) tune it from the environment.
+The measured saving that motivated the tool and the live rule-match evidence are recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
 ## Toolchain
 
@@ -1040,6 +1071,11 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
+TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_BASE_URL=https://api.typesafe.ai   # typesafe.ai endpoint, mainly for a stub during tests
+FM_TYPESAFE_MODEL=jev-latest   # typesafe.ai model id the dispatch-resolve request names
+FM_DISPATCH_RESOLVE_FLOOR=0.6   # confidence below which dispatch-resolve reports ambiguous instead of a profile
+FM_DISPATCH_RESOLVE_TIMEOUT=5   # seconds bounding the one dispatch-resolve API call
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
