@@ -293,19 +293,19 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       (applicable($p; ($c.model // ""))) as $rows |
       (evidence($rows)) as $bounds |
       (floor_state($c.floor; $p)) as $profile_floor_state |
-      if $profile_floor_state == "unknown" then
+      if ($rows | length) == 0 then {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true, unknown: true, reason: "no applicable quota row for provider \($p)"}
+      elif any($rows[]; (.runway.status // "") == "exhausted_now") then
+        ($rows | map(select((.runway.status // "") == "exhausted_now")) | first) as $bad |
+        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: ($bad.effectivePercentRemaining // null), runway: $bad.runway.status, eligible: false, reason: "runway exhausted_now at \($bad.scope)"}
+      elif any($rows[]; .status == "known" and (.effectivePercentRemaining | type) == "number" and .effectivePercentRemaining <= 0) then
+        ($rows | map(select(.status == "known" and (.effectivePercentRemaining | type) == "number" and .effectivePercentRemaining <= 0)) | first) as $bad |
+        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "0% remaining at \($bad.scope)"}
+      elif $profile_floor_state == "unknown" then
         ([rows($p)[] | select(.scope == $c.floor.scope)] | first) as $floor_row |
         {profile: $c, provider: $p, bounds: $bounds, scope: $c.floor.scope, pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: true, unranked: true, unknown: true, reason: "profile floor \($c.floor.scope) is unverifiable: not rankable"}
-      elif ($rows | length) == 0 then {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true, unknown: true, reason: "no applicable quota row for provider \($p)"}
       elif any($rows[]; .status != "known") then
         ($rows | map(select(.status != "known")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, eligible: true, unranked: true, unknown: true, reason: "quota row \($bad.scope) unknown: not rankable"}
-      elif any($rows[]; (.runway.status // "") == "exhausted_now") then
-        ($rows | map(select((.runway.status // "") == "exhausted_now")) | first) as $bad |
-        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "runway exhausted_now at \($bad.scope)"}
-      elif any($rows[]; (.effectivePercentRemaining // 0) <= 0) then
-        ($rows | map(select((.effectivePercentRemaining // 0) <= 0)) | first) as $bad |
-        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "0% remaining at \($bad.scope)"}
       elif $profile_floor_state == "below" then
         ([rows($p)[] | select(
           .scope == $c.floor.scope and
