@@ -647,7 +647,7 @@ meta_field() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 # capture technique in fm-spawn-dispatch-profile.test.sh so the constructed
 # launch command (not just meta) can be asserted on. Also answers the
 # `#{pane_current_path}` probe from FM_FAKE_PANE_PATH so this same stub works
-# for a crew/scout (non-secondmate) spawn's treehouse-worktree wait loop.
+# for a crew/scout (non-secondmate) spawn's worktree-arrival confirmation.
 make_launch_capturing_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
@@ -678,6 +678,9 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" pi
+  # A crew or scout spawn leases its worktree here rather than reading it off the
+  # pane, so the same stub set has to answer `treehouse get --lease`.
+  fm_fake_treehouse_lease "$fakebin"
   # BASE_PATH deliberately omits the developer's node, which the trust
   # registration below needs, so link the real one in rather than presenting a
   # node-less spawn host no real fleet member looks like.
@@ -1230,14 +1233,6 @@ reread_retry_report_path() {
   done
   [ -n "$latest" ] || return 1
   printf '%s\n' "$latest"
-}
-
-reread_mode() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %Lp "$1"
-  else
-    stat -c %a "$1"
-  fi
 }
 
 assert_no_reread_instructions() {
@@ -1818,8 +1813,8 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
   instr_b=$(reread_instruction_path "$w/beta") || fail "beta instruction missing after config push"
   assert_present "$instr_a" "alpha should receive a config-reread instruction file"
   assert_present "$instr_b" "beta should receive a config-reread instruction file"
-  [ "$(reread_mode "$instr_a")" = 600 ] || fail "alpha instruction is not private"
-  [ "$(reread_mode "$instr_b")" = 600 ] || fail "beta instruction is not private"
+  fm_test_assert_private_mode "$instr_a" 600 "alpha instruction is private"
+  fm_test_assert_private_mode "$instr_b" 600 "beta instruction is private"
 
   # Deterministic allowlist path order and exact destination bytes for alpha
   # (allowlisted config items were missing/stale and therefore pushed).

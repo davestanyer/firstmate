@@ -240,9 +240,17 @@ test_spawn_tmux_and_fakebin() {
   assert_grep 'codex --yolo' "$log" "send-keys -l payload was not logged"
   [ -x "$fakebin/treehouse" ] || fail "spawn fakebin should include treehouse"
   [ -x "$fakebin/gh-axi" ] || fail "extra exit-0 tools should land in the spawn fakebin"
-  "$fakebin/treehouse" get
-  expect_code 0 $? "fake treehouse should exit 0"
-  pass "spawn fakebin answers pane path, logs -l payloads, and installs extra tools"
+  # The spawn fakebin's treehouse leases rather than exiting 0, because
+  # fm-spawn.sh reads the task worktree off `treehouse get --lease` stdout.
+  out=$(FM_FAKE_LEASE_PATH="$TMP_ROOT/leased-wt" "$fakebin/treehouse" get --lease)
+  expect_code 0 $? "fake treehouse lease should exit 0"
+  [ "$out" = "$TMP_ROOT/leased-wt" ] \
+    || fail "fake treehouse should print the leased worktree, got '$out'"
+  ( FM_FAKE_LEASE_PATH='' "$fakebin/treehouse" get --lease >/dev/null )
+  expect_code 1 $? "fake treehouse should refuse when the pool hands out nothing"
+  "$fakebin/treehouse" return --force "$TMP_ROOT/leased-wt"
+  expect_code 0 $? "fake treehouse return should exit 0"
+  pass "spawn fakebin answers pane path, logs -l payloads, leases, and installs extra tools"
 }
 
 test_send_stubs_and_ssh() {

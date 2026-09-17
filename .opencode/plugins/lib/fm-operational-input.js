@@ -13,6 +13,8 @@ export function encodeFirstmateOperationalInput(root, kind, content) {
     const script = existsSync(requested)
       ? requested
       : `${adapterRoot}/bin/fm-operational-input.sh`;
+    // Windows has no shebang: CreateProcess cannot execute a .sh at all, so a
+    // direct spawn fails with EFTYPE. Run the script through bash there.
     const invocation = process.platform === "win32"
       ? { command: "bash", args: [script, "encode", kind] }
       : { command: script, args: ["encode", kind] };

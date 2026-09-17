@@ -44,7 +44,7 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  fm_fake_exit0 "$fakebin" tmux node jq chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -514,6 +514,36 @@ SH
   pass "bootstrap requires git with an install instruction"
 }
 
+test_jq_is_required_on_every_backend() {
+  local case_dir fakebin bash_env out expected
+  # jq is universal, not a session-provider extra: the turn-end and pretool guards
+  # exit 0 without it, so a tmux or orca home that never hears about it runs those
+  # guards inert. Mask jq rather than skipping the stub so the assertion holds on a
+  # host that ships jq inside BASE_PATH.
+  case_dir="$TMP_ROOT/jq-required-default-backend"
+  mkdir -p "$case_dir/home/config"
+  printf '%s
+' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  bash_env="$case_dir/no-jq.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+jq() {
+  return 127
+}
+SH
+
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home"     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  expected="MISSING: jq (install: brew install jq  # or the platform's package manager)"
+  [ "$out" = "$expected" ] || fail "the default backend must report missing jq, got: $out"
+  pass "bootstrap requires jq on the default backend, not only on JSON session providers"
+}
+
 test_orca_backend_gates_orca_tool_only_when_selected() {
   local case_dir fakebin out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
@@ -538,7 +568,7 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
 }
 
 # Build a fake toolchain with tmux REMOVED and the named backend session CLI(s)
-# plus jq added, so a backend that must NOT require tmux can be proven silent
+# added, so a backend that must NOT require tmux can be proven silent
 # with tmux absent. Echoes the fakebin dir. The removed tmux is what makes these
 # cases catch the old "everything but orca demands tmux" bug: with the buggy
 # TOOLS list a herdr/zellij/cmux home would report MISSING: tmux here.
@@ -547,7 +577,7 @@ make_fake_toolchain_no_tmux() {  # <case-dir> <extra-cli...>
   shift
   fakebin=$(make_fake_toolchain "$dir")
   rm -f "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" jq "$@"
+  fm_fake_exit0 "$fakebin" "$@"
   printf '%s\n' "$fakebin"
 }
 
@@ -659,7 +689,7 @@ test_json_backends_require_jq_not_tmux() {
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
-    # Session CLI present, tmux absent, jq deliberately NOT stubbed and masked below.
+    # Session CLI present, tmux absent, jq stubbed by the base builder but masked below.
     fakebin=$(make_fake_toolchain "$case_dir")
     rm -f "$fakebin/tmux"
     fm_fake_exit0 "$fakebin" "$backend"
@@ -1170,6 +1200,7 @@ test_lavish_axi_min_version
 test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
+test_jq_is_required_on_every_backend
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux

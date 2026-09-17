@@ -209,6 +209,10 @@ set -u
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
 if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
+  # fm-spawn leases the worktree from this call in its own shell, so hand it a
+  # path that is not a worktree: the post-create isolation check then aborts
+  # with the same "did not yield an isolated worktree" refusal.
+  printf '%s\n' "$POST_CREATE_ABORT_CONTROL/not-a-worktree"
   exit 0
 fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under

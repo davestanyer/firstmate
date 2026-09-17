@@ -95,7 +95,10 @@ case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
+  # fm-spawn leases the task worktree from `treehouse get --lease` in its own
+  # shell, so the stub must answer that call (tests/lib.sh).
+  fm_fake_treehouse_lease "$fakebin"
+  fm_fake_exit0 "$fakebin" gh gh-axi no-mistakes
 
   fm_git_init_commit "$case_dir/project"
   fm_git_add_origin "$case_dir/project" "$case_dir/project.origin.git"
@@ -483,6 +486,28 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+break_trace_context_delivery() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"export TRACEPARENT="*) exit 2 ;;
+esac
+case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+}
+
+break_kimi_readiness() {  # <case-dir>
+  local case_dir=$1 home
+  home=$(home_of "$case_dir")
+  mkdir -p "$home/.kimi-code"
+  printf '# test config\n' > "$home/.kimi-code/config.toml"
+  fm_fake_exit0 "$case_dir/fakebin" kimi
+}
+
 interrupt_kimi_readiness() {  # <case-dir>
   local case_dir=$1 home
   home=$(home_of "$case_dir")
@@ -508,6 +533,22 @@ case "\${1:-}" in
     exit 0
     ;;
 esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+}
+
+interrupt_launch_enter() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in *"#{pane_current_path}"*) printf '%s\\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
+case "\${1:-}" in display-message) printf 'firstmate\\n'; exit 0 ;; esac
+if [ "\${1:-}" = send-keys ] && [ "\$#" -eq 4 ] && [ "\$4" = Enter ] \\
+   && [ ! -f "$case_dir/launch-interrupted" ]; then
+  : > "$case_dir/launch-interrupted"
+  kill -TERM "\$PPID"
+fi
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tmux"
@@ -599,6 +640,7 @@ run_spawn() {  # <case-dir> <args...>
   mkdir -p "$case_dir/user-home"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" HOME="$case_dir/user-home" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
+    FM_FAKE_LEASE_LOG="$case_dir/local-copy-requested" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -1340,6 +1382,10 @@ test_dispatch_leaves_no_record_when_the_transition_fails() {
     "a failed backlog transition left an orphaned record behind"
   assert_absent "$(home_of "$case_dir")/state/$id.busy-state" \
     "a failed backlog transition left the task's armed busy generation behind"
+  assert_no_grep "treehouse return" "$case_dir/local-copy-requested" \
+    "a failed backlog transition after launch handed the live worktree back to the pool"
+  assert_contains "$out" "close out endpoint firstmate:fm-$id and local copy $case_dir/wt by hand" \
+    "a failed backlog transition did not tell the operator the local copy is still held"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "a failed dispatch left the backlog item in $(row_state "$case_dir" "$id")"
   pass "a failed backlog transition fails the dispatch loudly and leaves no record"
@@ -1359,6 +1405,8 @@ test_dispatch_reports_an_incomplete_record_rollback() {
   assert_contains "$out" "failed-dispatch cleanup is incomplete" \
     "spawn did not report that its provisional record remained"
   assert_present "$meta" "failed record removal was reported as successful"
+  assert_no_grep "treehouse return" "$case_dir/local-copy-requested" \
+    "a retained provisional record had its leased worktree handed back"
   assert_absent "$(home_of "$case_dir")/state/$id.busy-state" \
     "record-removal failure prevented busy-state rollback"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
@@ -1515,7 +1563,81 @@ test_dispatch_interruption_during_kimi_readiness_fails_before_commit() {
     "Kimi readiness interruption retained an unconfirmed task record"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "Kimi readiness interruption committed unconfirmed work In flight: $out"
+  assert_no_grep "treehouse return" "$case_dir/local-copy-requested" \
+    "Kimi readiness interruption handed the live worktree back to the pool"
   pass "Kimi readiness interruptions fail before backlog commit"
+}
+
+test_dispatch_keeps_the_lease_when_launch_fails_after_delivery() {
+  local case_dir home id out rc=0
+  id=atomic-dispatch-kimi-not-ready-lease-b6
+  case_dir=$(make_home dispatch-kimi-not-ready-lease "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  break_kimi_readiness "$case_dir"
+
+  out=$(HOME="$home" FM_KIMI_READY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    run_spawn "$case_dir" "$id" "$case_dir/project" --harness kimi \
+      --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a launch without a Kimi ready signal was reported as success"
+  assert_contains "$out" "kimi did not show a verified ready signal" \
+    "the failed launch did not report the missing ready signal"
+  assert_absent "$home/state/$id.meta" \
+    "the failed launch retained an unconfirmed task record"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "the failed launch committed unconfirmed work In flight: $out"
+  assert_no_grep "treehouse return" "$case_dir/local-copy-requested" \
+    "the failed launch handed the live worktree back to the pool"
+  assert_contains "$out" "is still leased to it - close out endpoint firstmate:fm-$id and local copy $case_dir/wt by hand" \
+    "the failed launch did not tell the operator the local copy is still held"
+  pass "a launch failure after delivery keeps the leased worktree and names it"
+}
+
+test_dispatch_interruption_during_launch_enter_keeps_the_lease() {
+  local case_dir home id out rc=0
+  id=atomic-dispatch-launch-enter-signal-b6
+  case_dir=$(make_home dispatch-launch-enter-signal "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  interrupt_launch_enter "$case_dir"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an interruption during the launch Enter was reported as success"
+  assert_present "$case_dir/launch-interrupted" "the fake tmux never saw the launch Enter"
+  assert_absent "$home/state/$id.meta" \
+    "an interruption during the launch Enter retained an unconfirmed task record"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "an interruption during the launch Enter committed unconfirmed work In flight: $out"
+  assert_no_grep "treehouse return" "$case_dir/local-copy-requested" \
+    "an interruption during the launch Enter handed the live worktree back to the pool"
+  assert_contains "$out" "is still leased to it - close out endpoint firstmate:fm-$id and local copy $case_dir/wt by hand" \
+    "an interruption during the launch Enter did not tell the operator the local copy is still held"
+  pass "an interruption during the launch Enter keeps the leased worktree"
+}
+
+test_dispatch_returns_the_lease_when_launch_fails_before_delivery() {
+  local case_dir home id out rc=0
+  id=atomic-dispatch-trace-send-lease-b6
+  case_dir=$(make_home dispatch-trace-send-lease "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  break_trace_context_delivery "$case_dir"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  printf '%s on\n' "$$" > "$home/state/.trace-context-effective"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a launch whose trace context could not be delivered was reported as success"
+  assert_contains "$out" "trace-context input could not be cleared" \
+    "the refused launch did not report the trace-context failure"
+  assert_absent "$home/state/$id.meta" \
+    "the refused launch retained an unconfirmed task record"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "the refused launch committed unconfirmed work In flight: $out"
+  assert_grep "treehouse return --force $case_dir/wt" "$case_dir/local-copy-requested" \
+    "the refused launch removed the record but kept the leased worktree"
+  assert_contains "$out" "local copy $case_dir/wt was returned to the pool - close out endpoint firstmate:fm-$id by hand" \
+    "the refused launch did not tell the operator the local copy was returned"
+  pass "a launch failure before delivery hands the leased worktree back and says so"
 }
 
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight() {
@@ -3031,6 +3153,9 @@ test_fm_tasks_axi_fallback_passes_the_child_status_and_output_through
 test_fm_tasks_axi_fails_closed_when_nothing_can_bound_the_call
 test_fm_tasks_axi_gnu_timeout_forces_termination_of_a_sigterm_ignoring_child
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit
+test_dispatch_keeps_the_lease_when_launch_fails_after_delivery
+test_dispatch_interruption_during_launch_enter_keeps_the_lease
+test_dispatch_returns_the_lease_when_launch_fails_before_delivery
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
