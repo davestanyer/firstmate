@@ -5,7 +5,6 @@
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>] [--rules <path>]
 #                          [--quota <quota-axi --json file>] [--json]
-#   fm-dispatch-resolve.sh --status
 #
 # Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
 #   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
@@ -81,14 +80,13 @@ usage() {
   ' "$0"
 }
 
-BRIEF='' PROJECT='' RULES="$CONFIG/crew-dispatch.json" QUOTA='' JSON=0 STATUS=0
+BRIEF='' PROJECT='' RULES="$CONFIG/crew-dispatch.json" QUOTA='' JSON=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
     --rules) [ $# -ge 2 ] || die "--rules needs a path"; RULES=$2; shift 2 ;;
     --quota) [ $# -ge 2 ] || die "--quota needs a path"; QUOTA=$2; shift 2 ;;
     --json) JSON=1; shift ;;
-    --status) STATUS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown flag $1" ;;
     *) [ -z "$BRIEF" ] || die "one brief file only"; BRIEF=$1; shift ;;
@@ -96,21 +94,11 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- opt-in gate ---------------------------------------------------------------
-KEY_SOURCE='environment'
 if [ -z "${TYPESAFE_API_KEY:-}" ]; then
   TYPESAFE_API_KEY=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-  KEY_SOURCE='.env'
 fi
 if [ -z "${TYPESAFE_API_KEY:-}" ]; then
-  if [ "$STATUS" = 1 ]; then
-    echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)"
-  else
-    echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-  fi
-  exit 0
-fi
-if [ "$STATUS" = 1 ]; then
-  echo "dispatch-resolve: on (key from $KEY_SOURCE, model $TS_MODEL, floor $CONFIDENCE_FLOOR)"
+  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
   exit 0
 fi
 
@@ -229,7 +217,10 @@ HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE
 T1=$(fm_timing_now_ms)
 LAT_MS=$(( T1 - T0 ))
 [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
-jq -e '(.answers.rule.choice | type) == "string" and (.answers.rule.confidence | type) == "number" and (.answers.rule.probabilities | type) == "object"' \
+jq -e '(.answers.rule.choice | type) == "string" and
+  (.answers.rule.confidence | type) == "number" and
+  .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
+  (.answers.rule.probabilities | type) == "object"' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
@@ -287,8 +278,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --arg lat "$LAT_MS" --arg none_cr
         ($rows | map(select((.effectivePercentRemaining // 0) <= 0)) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "0% remaining at \($bad.scope)"}
       elif (floor_ok($c.floor; $p) | not) then
-        ($rows | min_by(.effectivePercentRemaining)) as $limiting |
-        {profile: $c, provider: $p, bounds: $bounds, scope: $limiting.scope, pct: $limiting.effectivePercentRemaining, runway: $limiting.runway.status, eligible: false, reason: "profile floor \($c.floor.scope) below \($c.floor.min_percent)%"}
+        ([rows($p)[] | select(
+          .scope == $c.floor.scope and
+          (.status != "known" or ((.effectivePercentRemaining // -1) < $c.floor.min_percent))
+        )] | first) as $floor_row |
+        {profile: $c, provider: $p, bounds: $bounds, scope: ($floor_row.scope // $c.floor.scope), pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: false, reason: "profile floor \($c.floor.scope) below \($c.floor.min_percent)%"}
       elif any($rows[]; (.selection.spendPriority | type) != "number") then
         ($rows | map(select((.selection.spendPriority | type) != "number")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "spendPriority missing or non-numeric at \($bad.scope): not rankable"}

@@ -471,12 +471,11 @@ Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0,
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
 
 ```sh
-bin/fm-dispatch-resolve.sh --status                                   # off | on (key source, model, floor)
 bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON block on stdout
 bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name> --json
 ```
 
-When on, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus one fixed generic option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
+Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome. When on, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus one fixed generic option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
 Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot (or a `--quota` file), and the numeric `spendPriority` argmax over candidates using each candidate's limiting row. Any exhausted or zero applicable bound makes that candidate ineligible, missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable.
 The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, nothing rankable, or a genuine tie), or `error` (API, network, response, or quota-axi failure), and every one of them exits 0.
 Only a usage or configuration error exits 2: an unreadable brief or rules file, a malformed rules file, or missing `jq` or `curl`, each reported and never selected around.

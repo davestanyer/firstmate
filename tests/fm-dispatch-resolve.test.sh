@@ -159,23 +159,18 @@ assert_equals '' "$out" "absent key prints nothing on stdout"
 assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "absent key explains itself on stderr"
 assert_absent "$LOG/argv" "absent key never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent key never reads quota-axi"
-run code out err --status
-expect_code 0 "$code" "--status exits 0 when off"
-assert_contains "$out" 'dispatch-resolve: off' "--status reports off on stdout"
 pass "absent key is off: one stderr line, exit 0, no network call"
 
 # --- .env key, and the environment wins over it ------------------------------
 printf '%s\n' '# local secrets' 'FMX_PAIRING_TOKEN=abc' "export TYPESAFE_API_KEY=\"$KEY\"" > "$HOME_DIR/.env"
-run code out err --status
-expect_code 0 "$code" ".env key --status exits 0"
-assert_contains "$out" 'dispatch-resolve: on (key from .env' ".env key turns the tool on"
-TYPESAFE_API_KEY=env-wins run code out err --status
-assert_contains "$out" 'dispatch-resolve: on (key from environment' "environment key wins over .env"
 reset_log
 run code out err "$BRIEF" --project pager --rules "$RULES" --quota "$QUOTA"
 expect_code 0 "$code" ".env key resolves"
 assert_contains "$out" '  status: clear' ".env key produces a clear result"
 assert_contains "$(cat "$LOG/header")" "Authorization: Bearer $KEY" ".env key reaches curl on the fd header"
+reset_log
+TYPESAFE_API_KEY=env-wins run code out err "$BRIEF" --project pager --rules "$RULES" --quota "$QUOTA"
+assert_equals 'Authorization: Bearer env-wins' "$(cat "$LOG/header")" "environment key wins over .env"
 rm -f "$HOME_DIR/.env"
 pass "TYPESAFE_API_KEY= in .env activates the tool; environment takes precedence"
 
@@ -259,6 +254,13 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%' "declared provider routes a Pi profile to the codex row"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  -> not eligible: profile floor all_models below 50%' "profile floor makes a candidate ineligible with its reason"
 assert_contains "$out" '  profile: --harness pi --model openai-codex/gpt-5.6-sol' "the remaining eligible candidate wins"
+
+FLOOR_BOUNDS="$TMP_ROOT/floor-bounds.json"
+jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability) += [
+  {"scope":"model:gpt-5.6-sol","status":"known","effectivePercentRemaining":10,"runway":{"status":"projected_exhaustion"},"selection":{"spendPriority":-0.9}}
+]' "$QUOTA" > "$FLOOR_BOUNDS"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$FLOOR_BOUNDS"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  bounds=all_models:31%/projected_exhaustion,model:gpt-5.6-sol:10%/projected_exhaustion  -> not eligible: profile floor all_models below 50%' "a failed profile floor reports its named row while retaining all bounds"
 pass "declared provider and profile floor are applied in code"
 
 # --- malformed ranking evidence is never ordered -------------------------------
@@ -347,6 +349,11 @@ reset_log
 printf '%s\n' '{"model":"jev","answers":{}}' > "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "a malformed answer is an error outcome"
+reset_log
+write_response "$RESPONSE" rule_4 2
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+assert_contains "$out" '  status: error' "out-of-range confidence is an error outcome"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "out-of-range confidence is a malformed answer"
 reset_log
 write_response "$RESPONSE" rule_9 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
