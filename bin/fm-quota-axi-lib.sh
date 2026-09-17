@@ -10,6 +10,7 @@
 # what keeps an older build from reaching a dispatch intake at all.
 
 FM_QUOTA_AXI_MIN=0.1.29
+FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*$'
 
 fm_quota_axi_compatible() {
   local timeout=${1:-} output parts major minor patch extra
@@ -42,7 +43,7 @@ fm_quota_axi_compatible() {
 }
 
 fm_quota_json_valid() {
-  jq -se '
+  jq -se --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     length == 1 and
     (.[0] | type) == "object" and
     (.[0] |
@@ -51,7 +52,7 @@ fm_quota_json_valid() {
       (([.providers[].provider] | length) == ([.providers[].provider] | unique | length)) and
       all(.providers[];
       (.provider | type) == "string" and
-      (.provider | test("^[a-z0-9]+(-[a-z0-9]+)*$")) and
+      (.provider | test($provider_re)) and
       (.quotaSemantics | type) == "object" and
       (.quotaSemantics.status as $semantics_status |
         (["known", "partial", "unknown"] | index($semantics_status)) != null and
