@@ -22,8 +22,8 @@
 #   floor, the rule's declared `approval` and `floor`, each profile's declared
 #   `provider` and `floor`, the quota rows from ONE quota-axi --json snapshot,
 #   and the spendPriority argmax over the eligible candidates. The model never
-#   sees quota, catalogs, approvals, `why`, or `use`. With no rules, it skips
-#   that request and resolves the configured default profiles directly.
+#   sees quota, catalogs, approvals, `why`, or `use`. With no rules, it returns
+#   a non-clear result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
@@ -203,16 +203,16 @@ emit_error() {
   exit 0
 }
 
+if [ "$RULE_COUNT" -eq 0 ]; then
+  printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
+  exit 0
+fi
+
 RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
-DIRECT=false
 LAT_MS=null
-if [ "$RULE_COUNT" -eq 0 ]; then
-  DIRECT=true
-  jq -n '{model: null, answers: {rule: {choice: "default", confidence: null, probabilities: {default: 1}}}, usage: null}' > "$RESP_FILE"
-else
-  command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
+command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
@@ -236,7 +236,7 @@ else
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
-  jq -e --slurpfile rules "$RULES" '
+jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and
     (.answers.rule.confidence | type) == "number" and
@@ -249,8 +249,7 @@ else
       ((.usage | type) == "object" and
        (.usage.input_tokens | type) == "number" and
        (.usage.output_tokens | type) == "number"))' \
-    "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
-fi
+  "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
@@ -258,7 +257,7 @@ quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
-RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson direct "$DIRECT" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
+RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" '
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -288,19 +287,19 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
   def evaluate($c):
     (provider_of($c)) as $p |
     if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
-    elif prov($p) == null then {profile: $c, provider: $p, eligible: false, unranked: true, reason: "provider \($p) not in the quota snapshot"}
-    elif (measured($p) | not) then {profile: $c, provider: $p, eligible: false, unranked: true, reason: "provider \($p) unmeasured (\(prov($p).quotaSemantics.status))"}
+    elif prov($p) == null then {profile: $c, provider: $p, eligible: true, unranked: true, reason: "provider \($p) not in the quota snapshot"}
+    elif (measured($p) | not) then {profile: $c, provider: $p, eligible: true, unranked: true, reason: "provider \($p) unmeasured (\(prov($p).quotaSemantics.status))"}
     else
       (applicable($p; ($c.model // ""))) as $rows |
       (evidence($rows)) as $bounds |
       (floor_state($c.floor; $p)) as $profile_floor_state |
       if $profile_floor_state == "unknown" then
         ([rows($p)[] | select(.scope == $c.floor.scope)] | first) as $floor_row |
-        {profile: $c, provider: $p, bounds: $bounds, scope: $c.floor.scope, pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: false, unknown: true, reason: "profile floor \($c.floor.scope) is unverifiable: not rankable"}
-      elif ($rows | length) == 0 then {profile: $c, provider: $p, bounds: $bounds, eligible: false, unknown: true, reason: "no applicable quota row for provider \($p)"}
+        {profile: $c, provider: $p, bounds: $bounds, scope: $c.floor.scope, pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: true, unranked: true, unknown: true, reason: "profile floor \($c.floor.scope) is unverifiable: not rankable"}
+      elif ($rows | length) == 0 then {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true, unknown: true, reason: "no applicable quota row for provider \($p)"}
       elif any($rows[]; .status != "known") then
         ($rows | map(select(.status != "known")) | first) as $bad |
-        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, eligible: false, unknown: true, reason: "quota row \($bad.scope) unknown: disclosed uncertainty, not rankable"}
+        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, eligible: true, unranked: true, unknown: true, reason: "quota row \($bad.scope) unknown: not rankable"}
       elif any($rows[]; (.runway.status // "") == "exhausted_now") then
         ($rows | map(select((.runway.status // "") == "exhausted_now")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "runway exhausted_now at \($bad.scope)"}
@@ -315,7 +314,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
         {profile: $c, provider: $p, bounds: $bounds, scope: ($floor_row.scope // $c.floor.scope), pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: false, reason: "profile floor \($c.floor.scope) below \($c.floor.min_percent)%"}
       elif any($rows[]; (.selection.spendPriority | type) != "number") then
         ($rows | map(select((.selection.spendPriority | type) != "number")) | first) as $bad |
-        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "spendPriority missing or non-numeric at \($bad.scope): not rankable"}
+        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: true, unranked: true, reason: "spendPriority missing or non-numeric at \($bad.scope): not rankable"}
       else
         ($rows | min_by(.selection.spendPriority)) as $limiting |
         {profile: $c, provider: $p, bounds: $bounds, scope: $limiting.scope, pct: $limiting.effectivePercentRemaining,
@@ -348,14 +347,14 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
     confidence: $a.confidence, probabilities: $a.probabilities
   } as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
-  elif ($direct | not) and $a.confidence < ($floor | tonumber) then
+  elif $a.confidence < ($floor | tonumber) then
     $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
   elif $sel.escalate then
     $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else
     ($sel.use | map(evaluate(.))) as $cands |
-    ([$cands[] | select(.eligible)]) as $elig |
+    ([$cands[] | select(.eligible and ((.unranked // false) | not))]) as $elig |
     ([$cands[] | select(.unranked)]) as $unranked |
     if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
     else
@@ -364,7 +363,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
       if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
       else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
         + (if ($unranked | length) > 0 then
-             {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[].provider + " unmeasured"] | unique | join(", ")))"}
+             {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[].provider] | unique | join(", ")))"}
            else {} end)
       end
     end
@@ -373,6 +372,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
 TEXT=$(jq -r '
   def flat: tostring | gsub("[\t\r\n]"; " ");
   def show($value): ($value // "-") | flat;
+  def shell_arg: flat | @sh;
   "dispatch-resolve:",
   "  status: \(.status | flat)",
   "  model: \(show(.model))   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
@@ -386,8 +386,8 @@ TEXT=$(jq -r '
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
-  (if .chosen then "  profile: --harness \(.chosen.profile.harness | flat)"
-      + (if .chosen.profile.model then " --model \(.chosen.profile.model | flat)" else "" end)
-      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | flat)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+  (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
+      + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
+      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"
 exit 0

@@ -554,9 +554,11 @@ ok "Muse uses Meta quota"
 
 jq '.providers += [{"provider":"agy","windows":[],"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":25,"runway":{"status":"through_reset"}}]}}]' \
   "$LAB/captured.json" > "$AGY_POSITIVE"
-out=$(call_choose --snapshot "$AGY_POSITIVE" --candidate agy:default)
-[ "$out" = "agy default" ] || fail "supported Agy candidate returned: $out"
-ok "Agy uses its authoritative provider mapping"
+if err=$(call_choose --snapshot "$AGY_POSITIVE" --candidate agy:default 2>&1); then
+  fail "legacy quota chooser unexpectedly accepted Agy"
+fi
+printf '%s\n' "$err" | grep -F 'unknown harness: agy' >/dev/null || fail "legacy Agy rejection changed: $err"
+ok "Agy remains resolver-only"
 
 jq '.providers += [.providers[] | select(.provider == "claude")]' "$LAB/captured.json" > "$DUPLICATE"
 if err=$(call_choose --snapshot "$DUPLICATE" --candidate claude:default 2>&1); then

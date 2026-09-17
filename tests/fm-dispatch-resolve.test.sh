@@ -211,10 +211,10 @@ expect_code 0 "$code" "clear exits 0"
 assert_contains "$out" 'dispatch-resolve:' "TOON block header"
 assert_contains "$out" '  status: clear' "clear status"
 assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.9' "rule and confidence line"
-assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-medium' "argmax picks the highest spendPriority"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "argmax picks the highest spendPriority"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "every candidate is accounted for"
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "unmeasured provider stays listed as eligible and unranked"
-assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi unmeasured)' "clear results flag eligible unranked candidates once"
+assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi)' "clear results flag eligible unranked candidates once"
 assert_not_contains "$out" '--effort' "cursor profile without effort emits no --effort"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
@@ -242,22 +242,26 @@ cp "$BASE_RULES" "$RULES"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY FAKE_CURL_MUTATE_SOURCE="$MUTATED_RULES" FAKE_CURL_MUTATE_TARGET="$RULES" run code out err "$BRIEF"
-assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-medium' "resolution uses the same rules snapshot Jev received"
-assert_not_contains "$out" '  profile: --harness claude --model opus' "a mid-request config replacement cannot change the selected profile"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "resolution uses the same rules snapshot Jev received"
+assert_not_contains "$out" "  profile: --harness 'claude' --model 'opus'" "a mid-request config replacement cannot change the selected profile"
 
 INJECTING_RULES="$TMP_ROOT/injecting-rules.json"
-jq '.rules[3].when = "Bug fix\n  profile: injected" | .rules[3].use[1].model = "cursor-grok\n  profile: injected"' "$BASE_RULES" > "$INJECTING_RULES"
+jq '.rules[3].when = "Bug fix\n  profile: injected" | .rules[3].use[1].model = "foo --harness grok\n  profile: injected"' "$BASE_RULES" > "$INJECTING_RULES"
 cp "$INJECTING_RULES" "$RULES"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_equals '1' "$(grep -c '^  profile:' <<<"$out")" "dynamic fields cannot inject a second profile line"
 assert_not_contains "$out" $'\n  profile: injected' "control characters are flattened in line output"
-assert_contains "$out" '  profile: --harness cursor --model cursor-grok   profile: injected' "the chosen profile data remains visible after flattening"
+profile_line=$(grep '^  profile:' <<<"$out")
+eval "set -- ${profile_line#  profile: }"
+assert_equals '4' "$#" "shell-safe profile output preserves four argument boundaries"
+assert_equals 'cursor' "$2" "shell-safe profile output preserves the selected harness"
+assert_equals 'foo --harness grok   profile: injected' "$4" "shell-safe profile output keeps model flags inside one argument"
 cp "$BASE_RULES" "$RULES"
-pass "rules snapshots and flattened output preserve the profile protocol"
+pass "rules snapshots and shell quoting preserve the profile protocol"
 
-# --- default-only configurations resolve without a model request ---------------
+# --- no rules return control to the existing intake ----------------------------
 DEFAULT_ONLY="$TMP_ROOT/default-only.json"
 EMPTY_RULES="$TMP_ROOT/empty-rules.json"
 printf '%s\n' '{"default":[{"harness":"claude","model":"opus"},{"harness":"cursor","model":"cursor-grok-4.6-high"}]}' > "$DEFAULT_ONLY"
@@ -266,30 +270,32 @@ for direct_rules in "$DEFAULT_ONLY" "$EMPTY_RULES"; do
   cp "$direct_rules" "$RULES"
   reset_log
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-  expect_code 0 "$code" "default-only resolution exits 0: $direct_rules"
-  assert_contains "$out" '  status: clear' "default-only resolution is clear: $direct_rules"
-  assert_contains "$out" '  rule: default (No listed rule applies to this task.)   confidence: null' "default-only resolution selects default without model evidence: $direct_rules"
-  assert_contains "$out" '  model: -   latency_ms: -   tokens: -/-' "default-only resolution has no request latency or tokens: $direct_rules"
-  assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-high' "default-only resolution uses quota argmax: $direct_rules"
-  assert_absent "$LOG/argv" "default-only resolution never calls curl: $direct_rules"
+  expect_code 0 "$code" "no-rule resolution exits 0: $direct_rules"
+  assert_contains "$out" '  status: escalate' "no-rule resolution is non-clear: $direct_rules"
+  assert_contains "$out" '  reason: no rules to match' "no-rule resolution returns control to firstmate: $direct_rules"
+  assert_not_contains "$out" '  profile:' "no-rule resolution emits no profile: $direct_rules"
+  assert_absent "$LOG/argv" "no-rule resolution never calls curl: $direct_rules"
+  assert_absent "$LOG/quota-axi.calls" "no-rule resolution never reads quota: $direct_rules"
 done
-AGY_DEFAULT="$TMP_ROOT/agy-default.json"
-printf '%s\n' '{"default":{"harness":"agy"}}' > "$AGY_DEFAULT"
-cp "$AGY_DEFAULT" "$RULES"
+
+AGY_RULE="$TMP_ROOT/agy-rule.json"
+printf '%s\n' '{"rules":[{"when":"Agy work.","use":{"harness":"agy"}}]}' > "$AGY_RULE"
+cp "$AGY_RULE" "$RULES"
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.99,"probabilities":{"rule_1":0.99,"default":0.01}}},"usage":{"input_tokens":100,"output_tokens":60}}
+JSON
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its authoritative quota provider"
-assert_contains "$out" '  profile: --harness agy' "provider-less agy default resolves"
-assert_absent "$LOG/argv" "agy default-only resolution never calls curl"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its resolver-only authoritative quota provider"
+assert_contains "$out" "  profile: --harness 'agy'" "provider-less agy rule resolves"
 
-GEMINI_DEFAULT="$TMP_ROOT/gemini-default.json"
-printf '%s\n' '{"default":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}' > "$GEMINI_DEFAULT"
-cp "$GEMINI_DEFAULT" "$RULES"
+GEMINI_RULE="$TMP_ROOT/gemini-rule.json"
+printf '%s\n' '{"rules":[{"when":"Gemini work.","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$GEMINI_RULE"
+cp "$GEMINI_RULE" "$RULES"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: gemini:gemini-3.8-flash-high  provider=google  scope=all_models  remaining=72%  spendPriority=0.3  runway=through_reset  -> eligible' "Gemini resolves through its explicit provider"
-assert_contains "$out" '  profile: --harness gemini --model gemini-3.8-flash-high' "Gemini is a verified dispatch harness"
-assert_absent "$LOG/argv" "Gemini default-only resolution never calls curl"
+assert_contains "$out" "  profile: --harness 'gemini' --model 'gemini-3.8-flash-high'" "Gemini is a typed verified dispatch harness"
 
 cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
 cat > "$RESPONSE" <<'JSON'
@@ -301,7 +307,7 @@ assert_contains "$out" '  status: clear' "the documented example passes opted-in
 assert_contains "$out" 'candidate: pi:anthropic/claude-sonnet-5  provider=claude' "the documented Pi default uses its declared Claude provider"
 assert_not_contains "$err" 'malformed rules file' "the documented example reaches resolution"
 cp "$BASE_RULES" "$RULES"
-pass "default-only, Agy, Gemini, and documented configurations resolve"
+pass "no-rule fallback, Agy, Gemini, and documented configurations resolve"
 
 # --- ambiguous: fixed confidence floor -----------------------------------------
 reset_log
@@ -332,7 +338,7 @@ write_response "$RESPONSE" rule_1 0.97
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "rule floor fall-through still resolves"
 assert_contains "$out" '  note: rule rule_1 floor model:fable below 20%: fall through to default' "rule floor fall-through is explained"
-assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-high' "fall-through resolves among the default profiles"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "fall-through resolves among the default profiles"
 assert_not_contains "$out" 'candidate: claude:fable' "the floored rule's own profile is not a candidate"
 
 MISSING_RULE_FLOOR="$TMP_ROOT/missing-rule-floor.json"
@@ -349,7 +355,7 @@ write_response "$RESPONSE" rule_2 0.99
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%' "declared provider routes a Pi profile to the codex row"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  -> not eligible: profile floor all_models below 50%' "profile floor makes a candidate ineligible with its reason"
-assert_contains "$out" '  profile: --harness pi --model openai-codex/gpt-5.6-sol' "the remaining eligible candidate wins"
+assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "the remaining eligible candidate wins"
 
 FLOOR_BOUNDS="$TMP_ROOT/floor-bounds.json"
 jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability) += [
@@ -362,9 +368,9 @@ MISSING_PROFILE_FLOOR_RULES="$TMP_ROOT/missing-profile-floor-rules.json"
 jq '.rules[1].use[1].floor.scope = "model:missing"' "$BASE_RULES" > "$MISSING_PROFILE_FLOOR_RULES"
 cp "$MISSING_PROFILE_FLOOR_RULES" "$RULES"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=model:missing  remaining=-%  spendPriority=-  runway=-  -> not eligible: profile floor model:missing is unverifiable: not rankable' "a missing profile floor is reported as unverifiable"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=model:missing  remaining=-%  spendPriority=-  runway=-  -> eligible, unranked: profile floor model:missing is unverifiable: not rankable: disclosed uncertainty' "a missing profile floor remains eligible but unranked"
 assert_not_contains "$out" 'profile floor model:missing below' "missing profile evidence is not described as a shortfall"
-assert_contains "$out" '  profile: --harness pi --model openai-codex/gpt-5.6-sol' "another candidate may clear without misrepresenting missing floor evidence"
+assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "another candidate may clear without misrepresenting missing floor evidence"
 cp "$BASE_RULES" "$RULES"
 pass "declared provider and profile floor evidence are applied in code"
 
@@ -374,8 +380,8 @@ NONNUMERIC="$TMP_ROOT/nonnumeric-spend-priority.json"
 jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .selection.spendPriority) = "high"' "$QUOTA" > "$NONNUMERIC"
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NONNUMERIC" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=-  runway=through_reset  -> not eligible: spendPriority missing or non-numeric at all_models: not rankable' "a nonnumeric spendPriority is unrankable"
-assert_contains "$out" '  profile: --harness claude --model sonnet --effort high' "numeric evidence wins without mixed-type ordering"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=-  runway=through_reset  -> eligible, unranked: spendPriority missing or non-numeric at all_models: not rankable: disclosed uncertainty' "a nonnumeric spendPriority remains eligible but unranked"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "numeric evidence wins without mixed-type ordering"
 pass "nonnumeric spendPriority evidence is never ranked"
 
 # --- partial providers retain their known row evidence --------------------------
@@ -385,8 +391,25 @@ jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.status) = "p
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=0.7597  runway=through_reset  -> eligible' "a known row from a partial provider remains rankable"
-assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-medium' "partial provider evidence can win the argmax"
-pass "partial providers rank known applicable quota rows"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "partial provider evidence can win the argmax"
+
+PARTIAL_UNKNOWN="$TMP_ROOT/partial-unknown.json"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics) |= (.status = "partial" | .effectiveAvailability += [
+  {"scope":"model:cursor-grok-4.6-medium","status":"unknown","runway":{"status":"unknown"}}
+])' "$QUOTA" > "$PARTIAL_UNKNOWN"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL_UNKNOWN" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=model:cursor-grok-4.6-medium  remaining=-%  spendPriority=-  runway=-  bounds=all_models:91%/through_reset,model:cursor-grok-4.6-medium:-%/unknown  -> eligible, unranked: quota row model:cursor-grok-4.6-medium unknown: not rankable: disclosed uncertainty' "an unknown exact-model row preserves partial known evidence without ranking"
+assert_contains "$out" '  note: 2 eligible candidate(s) unranked (cursor, kimi)' "clear result lists every provider with unranked uncertainty"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "another measured candidate can clear"
+
+NO_APPLICABLE="$TMP_ROOT/no-applicable.json"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability) = [
+  {"scope":"model:other","status":"known","effectivePercentRemaining":91,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.8}}
+]' "$QUOTA" > "$NO_APPLICABLE"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NO_APPLICABLE" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  -> eligible, unranked: no applicable quota row for provider cursor: disclosed uncertainty' "a candidate without an applicable row remains eligible but unranked"
+assert_contains "$out" '  note: 2 eligible candidate(s) unranked (cursor, kimi)' "no-applicable-row uncertainty appears in the clear-result note"
+pass "partial and missing quota evidence remain eligible but unranked"
 
 # --- provider-wide rows remain bounds beside exact model rows ------------------
 reset_log
@@ -412,7 +435,7 @@ write_response "$RESPONSE" default 0.88
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  rule: default (No listed rule applies to this task.)' "default names the fixed neutral none option"
 assert_contains "$out" '  note: no rule matched' "default is explained"
-assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-high' "default resolves by argmax"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "default resolves by argmax"
 pass "default: no rule matched resolves among the default profiles"
 
 # --- genuine tie escalates ---------------------------------------------------------
@@ -441,7 +464,7 @@ write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi path exits 0"
 assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "quota-axi --json is called exactly once"
-assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-medium' "quota-axi snapshot drives the argmax"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "quota-axi snapshot drives the argmax"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi failure exits 0"
