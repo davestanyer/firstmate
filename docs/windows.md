@@ -141,6 +141,34 @@ git config --local core.autocrlf false
 
 An existing checkout that already has CRLF on disk keeps working, but convert it before running the linter there.
 
+## The links a Windows clone does not get
+
+Git for Windows sets `core.symlinks=false`, so every tracked symbolic link in this repository checks out as a small TEXT FILE containing its target path instead of as a link.
+Three paths are affected, and none of them announces the problem:
+
+```sh
+git ls-files -s | awk '$1=="120000"{print $4}'
+```
+
+- `.claude/skills` -> `.agents/skills` is the damaging one.
+  A harness opens it, receives `Not a directory`, and loads NONE of this repository's skills.
+  Nothing is printed, so the session simply answers as though those skills had never been written.
+- `.agents/skills/firstmate-calm` -> `.claude/mods/firstmate-calm` fails the same way, and stays invisible until Calm is switched on.
+- `.pi/extensions/lib/fm-calm-working-ship-sprite.ts` is a FILE link rather than a directory one.
+
+Restore each directory link as an NTFS junction, which needs no Developer Mode and no elevation, then stop Git reporting the replacement as a deletion:
+
+```sh
+powershell -NoProfile -Command "New-Item -ItemType Junction -Path .claude\skills -Target .agents\skills"
+git update-index --skip-worktree .claude/skills
+```
+
+A junction cannot stand in for the file link, because junctions are directory-only.
+Re-export its target from a one-line source file instead, and mark that path `--skip-worktree` as well so the working copy stops reading as modified forever.
+
+Check the result rather than trusting the command: `ls .claude/skills/` should list this repository's skills, not print `Not a directory`.
+None of this survives a fresh clone, so it is part of setting up a checkout rather than a one-time repair.
+
 ## Toolchain
 
 Install the pinned tools with the repository's own installers rather than a package manager, so the versions and checksums match the ones CI verifies:
@@ -209,6 +237,11 @@ Herdr 0.9.0-preview is a known example: it populates a pane's `cwd` field where 
 - `/usr/bin/kill -W` cannot address a process outside the MSYS runtime at all. That is a safety property rather than a gap, because the signalling path can never reach a process the adapter did not itself resolve.
 - Herdr reports no live working directory for a pane on Windows, so Firstmate acquires each task worktree directly with a Treehouse lease instead of reading it back off the terminal. That path is used on every platform, not only this one.
 - The downloaded binaries are unsigned, so SmartScreen may warn if they are launched from Explorer. Fetching them with the installers above does not mark them, so they run without a prompt.
+- Git Bash rewrites arguments that merely LOOK like POSIX paths before a native program receives them, which is one hazard with several faces rather than several bugs.
+  `git show <sha>:path` had its revision rewritten into a Windows path and reported a tracked file as absent; a `C:/...` value passed to a Node-backed CLI arrived as `C;C:\Program Files\Git\...`; and a harness slash command sent to a pane arrived as a path.
+  Prefix `MSYS2_ARG_CONV_EXCL='*'` for a native tool such as `git`, but NOT for a Node-backed CLI, where it also stops the interpreter's own script path converting and the command fails to load at all.
+  Passing the value in POSIX form (`/c/Users/...`) is the option that works in both cases.
+  The failure is usually a wrong answer rather than an error, so treat an impossible result here as argument conversion before believing it.
 
 ## Verification entry points
 
