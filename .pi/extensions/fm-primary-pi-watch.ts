@@ -41,6 +41,7 @@ import {
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import { firstmateParentPid } from "./lib/fm-parent-pid.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -199,9 +200,7 @@ function positiveInteger(name: string, fallback: number): number {
 }
 
 function parentPid(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
+  return firstmateParentPid(pid);
 }
 
 function pidAlive(pid: string): boolean {

@@ -61,7 +61,6 @@
 // readonly-variable shell prelude so an accidental override fails loudly
 // inside the branch's own shell. bin/fm-lease-lib.sh documents the grade and
 // its deliberate limits.
-import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -115,6 +114,7 @@ import {
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInputWith,
 } from "./lib/fm-operational-input.ts";
+import { firstmateParentPid, firstmateParentPidAsync } from "./lib/fm-parent-pid.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -313,15 +313,12 @@ function modelLabel(model: { provider: string; id: string }): string {
 }
 
 async function parentPid(pid: string): Promise<string> {
-  const result = await runCommandAsync("ps", ["-o", "ppid=", "-p", pid]);
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
+  return firstmateParentPidAsync(pid, (command, args) =>
+    runCommandAsync(command, args));
 }
 
 function parentPidSync(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
+  return firstmateParentPid(pid);
 }
 
 function pidAlive(pid: string): boolean {

@@ -9,6 +9,7 @@ import {
   encodeFirstmateOperationalInput,
   firstmateShellInvocation,
 } from "./lib/fm-operational-input.ts";
+import { firstmateParentPid } from "./lib/fm-parent-pid.ts";
 
 let guardFollowupActive = false;
 
@@ -23,9 +24,7 @@ const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
 function parentPid(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
+  return firstmateParentPid(pid);
 }
 
 function pidAlive(pid: string): boolean {
