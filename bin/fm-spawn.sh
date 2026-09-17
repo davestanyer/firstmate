@@ -4377,6 +4377,23 @@ spawn_record_traceparent() {
 # CLAUDE_CONFIG_DIR forward above: the daemon does not inherit our environment.
 if fm_platform_is_msys; then
   spawn_send_text_line "$T" "export PATH=$(shell_quote "$PATH"):\"\$PATH\""
+  # MSYS travels the same way and for the same reason, and without it a worker
+  # is quietly crippled.
+  #
+  # Git Bash creates a DIRECTORY COPY instead of a symlink unless MSYS names a
+  # winsymlinks mode, and firstmate's whole lock layer is built from symlinks:
+  # `ln -s` reports success, `readlink` returns nothing, and no lock can ever be
+  # proved owned. The repository ships this variable in .claude/settings.json,
+  # which covers firstmate's OWN processes because the harness sets it there -
+  # but the backend daemon that owns the pane never inherited it, so every
+  # worker shell starts without it and wedges the first time it takes a lock.
+  # Measured: a worker reproduced the wedge while firstmate itself was fine.
+  #
+  # Forward this home's own value so an operator who chose a different mode
+  # keeps it, and fall back to the mode docs/windows.md requires when the
+  # variable is absent, which is the case for any firstmate process launched
+  # outside a harness that sets it.
+  spawn_send_text_line "$T" "export MSYS=$(shell_quote "${MSYS:-winsymlinks:sys}")"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
