@@ -403,7 +403,8 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":20,"provider":"claude"}}}]}|each use profile needs harness; model, effort, provider, and floor must be well formed when present' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
-  '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|multi-provider use profiles require provider'; do
+  '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|multi-provider use profiles require provider' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|multi-provider default profiles require provider'; do
   printf '%s\n' "${bad%%|*}" > "$TMP_ROOT/bad.json"
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$TMP_ROOT/bad.json" --quota "$QUOTA"
   expect_code 2 "$code" "malformed rules exit 2: ${bad#*|}"
