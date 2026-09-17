@@ -1,5 +1,4 @@
 {
-  "default_when": "No listed rule applies: ordinary routine work such as small well-understood changes, docs, chores, and reviews.",
   "rules": [
     {
       "when": "The task depends on fresh news, current events, live public facts, or recent market and product changes.",
@@ -22,6 +21,6 @@
   ],
   "default": [
     { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
-    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
+    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium", "provider": "claude" }
   ]
 }

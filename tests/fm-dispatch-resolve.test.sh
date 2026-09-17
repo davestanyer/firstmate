@@ -30,7 +30,6 @@ MD
 
 cat > "$RULES" <<'JSON'
 {
-  "default_when": "No listed rule applies: ordinary routine work.",
   "rules": [
     {
       "when": "New feature work on the app.",
@@ -203,7 +202,7 @@ assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides i
 assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the whole brief rides in the state"
 assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
 assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' "$(jq -c '.questions.rule.criteria | keys' <<<"$body")" "one option per rule plus default"
-assert_equals 'No listed rule applies: ordinary routine work.' "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "default_when is the default option"
+assert_equals "No listed rule applies. Ordinary routine work of any kind - small well-understood features, tweaks, refactors, docs, chores, reviews, investigations, and bug fixes that are not simple fixes with an explicitly stated root cause. Also use this option whenever a rule's own exemption text excludes the task." "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "the fixed generic none criterion is the default option"
 assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r '.questions.rule.criteria.rule_4' <<<"$body")" "rule when text is the option verbatim"
 assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine"
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
@@ -262,11 +261,29 @@ assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_
 assert_contains "$out" '  profile: --harness pi --model openai-codex/gpt-5.6-sol' "the remaining eligible candidate wins"
 pass "declared provider and profile floor are applied in code"
 
+# --- provider-wide rows remain bounds beside exact model rows ------------------
+reset_log
+BOUNDED="$TMP_ROOT/bounded.json"
+jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability) += [
+  {"scope":"model:sonnet","status":"known","effectivePercentRemaining":99,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.9}}
+]' "$QUOTA" > "$BOUNDED"
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$BOUNDED"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627' "the limiting provider-wide row drives ranking"
+assert_contains "$out" 'bounds=all_models:79%/projected_exhaustion,model:sonnet:99%/through_reset' "all applicable quota bounds are disclosed"
+
+EXHAUSTED_WIDE="$TMP_ROOT/exhausted-wide.json"
+jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models")) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$BOUNDED" > "$EXHAUSTED_WIDE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$EXHAUSTED_WIDE"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=0%' "the exhausted account-wide bound is the candidate evidence"
+assert_contains "$out" '-> not eligible: runway exhausted_now at all_models' "a healthy exact row cannot bypass an exhausted account-wide bound"
+pass "provider-wide and exact quota rows combine into one limiting candidate"
+
 # --- default choice ------------------------------------------------------------
 reset_log
 write_response "$RESPONSE" default 0.88
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
-assert_contains "$out" '  rule: default (No listed rule applies: ordinary routine work.)   confidence: 0.88' "default names default_when"
+assert_contains "$out" '  rule: default (No listed rule applies.' "default names the fixed generic none option"
 assert_contains "$out" '  note: no rule matched' "default is explained"
 assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-high' "default resolves by argmax"
 pass "default: no rule matched resolves among the default profiles"
@@ -325,6 +342,10 @@ write_response "$RESPONSE" rule_9 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
 assert_contains "$out" '  status: error' "an unknown rule id is an error outcome"
 assert_contains "$out" '  reason: rule rule_9 is not in the rules file' "unknown rule id is named"
+write_response "$RESPONSE" rule_0 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+assert_contains "$out" '  status: error' "rule zero is an error outcome"
+assert_contains "$out" '  reason: rule rule_0 is not in the rules file' "rule zero cannot alias the final rule"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA" --json
 assert_equals 'error' "$(jq -r .status <<<"$out")" "--json error status"
@@ -345,7 +366,9 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, provider, and floor must be well formed when present' \
-  '{"rules":[{"when":"x","use":{"harness":"claude"}}],"default_when":""}|default_when must be a non-empty string' \
+  '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
+  '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
+  '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|multi-provider use profiles require provider' \
   '{"rules":[]}|rules must be a non-empty array'; do
   printf '%s\n' "${bad%%|*}" > "$TMP_ROOT/bad.json"
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$TMP_ROOT/bad.json" --quota "$QUOTA"
@@ -353,6 +376,12 @@ for bad in \
   assert_contains "$err" "malformed rules file: $TMP_ROOT/bad.json - ${bad#*|}" "malformed rules are named: ${bad#*|}"
 done
 assert_absent "$LOG/argv" "configuration errors never reach the network"
+for floor in 1.01 0.6junk -0.1; do
+  TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_FLOOR=$floor run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+  expect_code 2 "$code" "invalid confidence floor exits 2: $floor"
+  assert_contains "$err" 'FM_DISPATCH_RESOLVE_FLOOR must be a number between 0 and 1' "invalid confidence floor is named: $floor"
+done
+assert_absent "$LOG/argv" "invalid confidence floors fail before the network"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --bogus
 expect_code 2 "$code" "unknown flag exits 2"
 run code out err --help

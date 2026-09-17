@@ -96,9 +96,10 @@ fm_quota_json_valid() {
 # Map a firstmate harness name to its primary quota-axi provider family, the
 # single owner of that table for bin/fm-quota-choose.sh and
 # bin/fm-dispatch-resolve.sh. Multi-provider harnesses (Pi, OpenCode) map to
-# their primary family only; a dispatch profile that runs another family
-# declares `provider` explicitly (docs/configuration.md "Crew dispatch
-# profiles"). omp is keyed on the candidate model prefix and has no family for
+# their primary family only for callers that permit that policy;
+# fm-dispatch-resolve.sh requires every multi-provider profile to declare
+# `provider` explicitly (docs/configuration.md "Crew dispatch profiles"). omp
+# is keyed on the candidate model prefix and has no family for
 # any other prefix. Prints nothing and returns 1 when no family is known.
 # Authoritative multi-provider routing stays owned by AGENTS.md section 4 and
 # the quota-array-dispatch skill; this table never infers a family from a
