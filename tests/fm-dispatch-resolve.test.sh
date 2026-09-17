@@ -199,7 +199,7 @@ pass "TYPESAFE_API_KEY= in .env activates the tool; environment and config overr
 # --- clear: request shape, secret handling, argmax --------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL=https://stub.invalid run code out err "$BRIEF" --project pager
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "clear exits 0"
 assert_contains "$out" 'dispatch-resolve:' "TOON block header"
 assert_contains "$out" '  status: clear' "clear status"
@@ -210,7 +210,8 @@ assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> not elig
 assert_not_contains "$out" '--effort' "cursor profile without effort emits no --effort"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
-assert_contains "$argv" 'https://stub.invalid/v1/systemone' "TYPESAFE_BASE_URL selects the endpoint"
+assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request uses the fixed typesafe.ai endpoint"
+assert_contains "$argv" $'--max-time\n5' "the request uses the fixed five-second timeout"
 assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives the bearer header on fd 3"
 body=$(cat "$LOG/body")
@@ -245,7 +246,7 @@ done
 cp "$BASE_RULES" "$RULES"
 pass "default-only and empty-rules configurations resolve without an API call"
 
-# --- ambiguous: confidence floor, overridable ---------------------------------
+# --- ambiguous: fixed confidence floor -----------------------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.41
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
@@ -253,9 +254,7 @@ expect_code 0 "$code" "ambiguous exits 0"
 assert_contains "$out" '  status: ambiguous' "below the floor is ambiguous"
 assert_contains "$out" '  reason: confidence 0.41 below floor 0.6' "ambiguous names the floor"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
-TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_FLOOR=0.3 run code out err "$BRIEF"
-assert_contains "$out" '  status: clear' "FM_DISPATCH_RESOLVE_FLOOR lowers the floor"
-pass "ambiguous: confidence below the floor hands the decision back"
+pass "ambiguous: confidence below the fixed floor hands the decision back"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log
@@ -318,6 +317,16 @@ TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NONNUMERIC" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=-  runway=through_reset  -> not eligible: spendPriority missing or non-numeric at all_models: not rankable' "a nonnumeric spendPriority is unrankable"
 assert_contains "$out" '  profile: --harness claude --model sonnet --effort high' "numeric evidence wins without mixed-type ordering"
 pass "nonnumeric spendPriority evidence is never ranked"
+
+# --- partial providers retain their known row evidence --------------------------
+reset_log
+PARTIAL="$TMP_ROOT/partial.json"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.status) = "partial"' "$QUOTA" > "$PARTIAL"
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=0.7597  runway=through_reset  -> eligible' "a known row from a partial provider remains rankable"
+assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-medium' "partial provider evidence can win the argmax"
+pass "partial providers rank known applicable quota rows"
 
 # --- provider-wide rows remain bounds beside exact model rows ------------------
 reset_log
@@ -478,12 +487,6 @@ for bad in \
 done
 assert_absent "$LOG/argv" "configuration errors never reach the network"
 cp "$BASE_RULES" "$RULES"
-for floor in 1.01 0.6junk -0.1; do
-  TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_FLOOR=$floor run code out err "$BRIEF"
-  expect_code 2 "$code" "invalid confidence floor exits 2: $floor"
-  assert_contains "$err" 'FM_DISPATCH_RESOLVE_FLOOR must be a number between 0 and 1' "invalid confidence floor is named: $floor"
-done
-assert_absent "$LOG/argv" "invalid confidence floors fail before the network"
 for removed in --json --rules --quota; do
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" "$removed"
   expect_code 2 "$code" "removed option is rejected: $removed"

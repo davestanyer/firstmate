@@ -14,7 +14,7 @@
 #   a file descriptor, never on argv; nothing logs or writes it.
 #
 # What it does when on with at least one rule: one POST to
-#   $TYPESAFE_BASE_URL/v1/systemone with the project name and the whole brief as
+#   https://api.typesafe.ai/v1/systemone with the project name and the whole brief as
 #   state and ONE Choice question whose
 #   options are every rule's `when` from config/crew-dispatch.json plus one
 #   fixed generic none option. Jev returns the matched rule, a probability per
@@ -44,10 +44,7 @@
 #   around.
 #
 # Environment:
-#   TYPESAFE_API_KEY, TYPESAFE_BASE_URL (default https://api.typesafe.ai),
-#   FM_TYPESAFE_MODEL (default jev-latest), FM_DISPATCH_RESOLVE_FLOOR
-#   (confidence floor, default 0.6), FM_DISPATCH_RESOLVE_TIMEOUT (curl
-#   --max-time seconds, default 5).
+#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -66,10 +63,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 
-CONFIDENCE_FLOOR=${FM_DISPATCH_RESOLVE_FLOOR:-0.6}
-TS_MODEL=${FM_TYPESAFE_MODEL:-jev-latest}
-TS_BASE=${TYPESAFE_BASE_URL:-https://api.typesafe.ai}
-TS_TIMEOUT=${FM_DISPATCH_RESOLVE_TIMEOUT:-5}
+CONFIDENCE_FLOOR=0.6
+TS_MODEL=jev-latest
+TS_BASE=https://api.typesafe.ai
+TS_TIMEOUT=5
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
@@ -105,10 +102,6 @@ fi
 [ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
 [ -r "$RULES" ] || die "rules file not readable: $RULES"
 command -v jq >/dev/null 2>&1 || die "jq required"
-jq -en --arg value "$CONFIDENCE_FLOOR" '
-  ($value | test("^(0([.][0-9]+)?|1([.]0+)?)$")) and
-  (($value | tonumber) >= 0 and ($value | tonumber) <= 1)
-' >/dev/null || die "FM_DISPATCH_RESOLVE_FLOOR must be a number between 0 and 1: $CONFIDENCE_FLOOR"
 
 # The fields this tool consumes must be well formed; bootstrap owns the wider
 # schema diagnostic, but an intake never selects around a malformed file.
@@ -256,7 +249,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
     if multi_provider($c.harness) then ($c.provider // null)
     else ($c.provider // $pmap["\($c.harness)|\($c.model // "")"] // null)
     end;
-  def measured($p): (prov($p) != null and prov($p).quotaSemantics.status == "known");
+  def measured($p):
+    (prov($p) != null and (["known", "partial"] | index(prov($p).quotaSemantics.status)) != null);
   def applicable($p; $m):
     (bare($m)) as $bare |
     [rows($p)[] | select(
