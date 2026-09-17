@@ -222,6 +222,11 @@ bin/fm-lint.sh
 
 It refuses to run under any ShellCheck or actionlint version other than its pins, which the installers above provide.
 
+Budget real time for that full run here: measured at roughly sixteen to twenty minutes against 408 shell files, where the same gate takes minutes on Linux CI.
+The cost is `--external-sources`, which the full run enables so ShellCheck follows each `source`d library: one file costs about 2.4 seconds with it and about 0.7 without, on a repository whose scripts source several shared libraries each.
+Process startup is not the cause and is not worth optimizing - a bare ShellCheck invocation here costs about 33 milliseconds.
+Use `bin/fm-lint.sh --fast [path]...` while iterating, which disables extended analysis, and keep the full run for the point where the change is otherwise done.
+
 ## Troubleshooting
 
 **A session reports that it cannot locate the harness process in its ancestry, and stays read-only.**
