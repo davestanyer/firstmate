@@ -3291,12 +3291,22 @@ spawn_send_worktree_cd() {  # <source> <worktree>
 #
 # It is deliberately not a gate on its own. The worktree is acquired and
 # validated against the filesystem before this runs, and every backend's
-# current-path read is optional capability: Herdr on Windows reports null
-# forever, so an empty read is "this platform cannot answer", not "the pane is
-# somewhere else". Empty therefore proceeds. A NON-empty read is a real answer
-# and must agree with the worktree, physically resolved on both sides the way
-# every other path comparison in this script is, or the spawn refuses rather
-# than launching an agent outside the copy holding its work.
+# current-path read is optional capability, so an empty read is "this platform
+# cannot answer", not "the pane is somewhere else". Empty therefore proceeds. A
+# NON-empty read is a real answer and must agree with the worktree, physically
+# resolved on both sides the way every other path comparison in this script is,
+# or the spawn refuses rather than launching an agent outside the copy holding
+# its work.
+#
+# Herdr on Windows DOES answer, and reading otherwise has already cost one
+# wrongly disabled check. Its pane carries no foreground_cwd key, but the
+# adapter falls back to .cwd, which is LIVE there and tracks the sent `cd`
+# (measured: C:\Users\DaveStanyer\ before, ...\cubprojects\firstmate\ after).
+# A non-empty Windows read that disagrees is therefore a genuine disagreement.
+# The one shape that looks like a frozen directory is a pane running a
+# non-POSIX shell, where the sent `cd` never executed and the pane really has
+# not moved; docs/windows.md owns why Herdr's default pane shell must be Git
+# Bash, and docs/herdr-backend.md's active limits own the .cwd contract.
 #
 # The agent-side backstop for the platforms that cannot answer is the ship
 # brief's own isolation assertion (bin/fm-brief.sh), which stops the worker if
