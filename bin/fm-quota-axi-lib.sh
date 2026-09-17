@@ -92,19 +92,42 @@ fm_quota_json_valid() {
   ' >/dev/null 2>&1
 }
 
+fm_quota_single_provider_table() {
+  printf '%s\n' \
+    'claude claude' \
+    'codex codex' \
+    'grok grok' \
+    'kimi kimi' \
+    'cursor cursor' \
+    'agy agy' \
+    'muse meta'
+}
+
+fm_quota_single_provider_for_harness() {
+  local harness provider
+  while read -r harness provider; do
+    if [ "$harness" = "$1" ]; then
+      printf '%s\n' "$provider"
+      return 0
+    fi
+  done < <(fm_quota_single_provider_table)
+  return 1
+}
+
 # fm_quota_provider_for_harness <harness> [<model>]
 # Map a firstmate harness name to its primary quota-axi provider family, the
 # single owner of that table for bin/fm-quota-choose.sh and
 # bin/fm-dispatch-resolve.sh. Multi-provider harnesses (Pi, OpenCode) map to
 # their primary family only for callers that permit that policy;
-# fm-dispatch-resolve.sh requires every multi-provider profile to declare
-# `provider` explicitly (docs/configuration.md "Crew dispatch profiles"). omp
-# is keyed on the candidate model prefix and has no family for
-# any other prefix. Prints nothing and returns 1 when no family is known.
-# Authoritative multi-provider routing stays owned by AGENTS.md section 4 and
-# the quota-array-dispatch skill; this table never infers a family from a
-# model name.
+# fm-dispatch-resolve.sh uses fm_quota_single_provider_for_harness and requires
+# every other profile to declare `provider` explicitly (docs/configuration.md
+# "Crew dispatch profiles"). omp is keyed on the candidate model prefix and
+# has no family for any other prefix. Prints nothing and returns 1 when no
+# family is known. Authoritative multi-provider routing stays owned by
+# AGENTS.md section 4 and the quota-array-dispatch skill; this table never
+# infers a family from a model name.
 fm_quota_provider_for_harness() {
+  fm_quota_single_provider_for_harness "$1" && return 0
   case "$1" in
     omp)
       case "${2:-}" in
@@ -113,14 +136,8 @@ fm_quota_provider_for_harness() {
         *)               return 1 ;;
       esac
       ;;
-    claude)       printf 'claude\n' ;;
-    codex)        printf 'codex\n' ;;
     opencode)     printf 'codex\n' ;;
     pi|pi-signed) printf 'pi\n' ;;
-    grok)         printf 'grok\n' ;;
-    kimi)         printf 'kimi\n' ;;
-    cursor)       printf 'cursor\n' ;;
-    muse)         printf 'meta\n' ;;
     *)            return 1 ;;
   esac
 }

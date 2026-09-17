@@ -85,6 +85,8 @@ write_quota() {  # <path> <cursor spendPriority> [<claude all_models spendPriori
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 31, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": -0.1649 } } ] } },
     { "provider": "cursor", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 91, "runway": { "status": "through_reset" }, "selection": { "spendPriority": $cursor } } ] } },
+    { "provider": "agy", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 64, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.4 } } ] } },
     { "provider": "kimi", "state": { "status": "unknown" }, "quotaSemantics": { "status": "unknown", "effectiveAvailability": [] } }
   ]
 }
@@ -243,8 +245,16 @@ for direct_rules in "$DEFAULT_ONLY" "$EMPTY_RULES"; do
   assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-high' "default-only resolution uses quota argmax: $direct_rules"
   assert_absent "$LOG/argv" "default-only resolution never calls curl: $direct_rules"
 done
+AGY_DEFAULT="$TMP_ROOT/agy-default.json"
+printf '%s\n' '{"default":{"harness":"agy"}}' > "$AGY_DEFAULT"
+cp "$AGY_DEFAULT" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its authoritative quota provider"
+assert_contains "$out" '  profile: --harness agy' "provider-less agy default resolves"
+assert_absent "$LOG/argv" "agy default-only resolution never calls curl"
 cp "$BASE_RULES" "$RULES"
-pass "default-only and empty-rules configurations resolve without an API call"
+pass "default-only, empty-rules, and agy configurations resolve without an API call"
 
 # --- ambiguous: fixed confidence floor -----------------------------------------
 reset_log
@@ -478,8 +488,9 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
-  '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|multi-provider use profiles require provider' \
-  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|multi-provider default profiles require provider'; do
+  '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|use profiles whose harness lacks one authoritative provider family require provider: opencode' \
+  '{"rules":[{"when":"x","use":{"harness":"rovo"}}]}|use profiles whose harness lacks one authoritative provider family require provider: rovo' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|default profiles whose harness lacks one authoritative provider family require provider: pi'; do
   printf '%s\n' "${bad%%|*}" > "$RULES"
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
   expect_code 2 "$code" "malformed rules exit 2: ${bad#*|}"

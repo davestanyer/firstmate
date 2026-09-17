@@ -118,7 +118,6 @@ rules_err=$(jq -r '
     elif $h == "rovo" then (["low","medium","high","max"] | index($e)) != null
     elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
     else true end;
-  def multi_provider($h): ["pi","pi-signed","omp","opencode"] | index($h) != null;
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def floor_bad($f; $need_provider):
     ($f | type) != "object"
@@ -149,24 +148,35 @@ rules_err=$(jq -r '
   elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
   elif any((.rules // [])[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
   elif any((.rules // [])[] | profiles(.use)[]; (effort_ok(.harness; .model; .effort) | not)) then "each use profile effort must be supported by its harness and model"
-  elif any((.rules // [])[] | profiles(.use)[]; multi_provider(.harness) and (has("provider") | not)) then "multi-provider use profiles require provider"
   elif has("default") and (profiles(.default) | length) == 0 then "default must be a profile object or non-empty profile array"
   elif has("default") and any(profiles(.default)[]; profile_bad(.)) then "each default profile needs harness; model, effort, provider, and floor must be well formed when present"
   elif has("default") and duplicate_profiles(profiles(.default)) then "default must not contain duplicate harness, model, and effort profiles"
   elif has("default") and any(profiles(.default)[]; (verified(.harness) | not)) then "each default profile must name a verified harness"
   elif has("default") and any(profiles(.default)[]; (effort_ok(.harness; .model; .effort) | not)) then "each default profile effort must be supported by its harness and model"
-  elif has("default") and any(profiles(.default)[]; multi_provider(.harness) and (has("provider") | not)) then "multi-provider default profiles require provider"
   else empty end
 ' "$RULES" 2>/dev/null) || die "malformed rules file: $RULES (not JSON)"
 [ -z "$rules_err" ] || die "malformed rules file: $RULES - $rules_err"
 
+missing_provider=$(jq -r '
+  def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+  ((.rules // [])[] | profiles(.use)[] | select(has("provider") | not) | "use\t\(.harness)"),
+  (profiles(.default // null)[] | select(has("provider") | not) | "default\t\(.harness)")
+' "$RULES" | while IFS=$'\t' read -r location harness; do
+  if ! fm_quota_single_provider_for_harness "$harness" >/dev/null; then
+    printf '%s\t%s\n' "$location" "$harness"
+    break
+  fi
+done)
+if [ -n "$missing_provider" ]; then
+  IFS=$'\t' read -r location harness <<< "$missing_provider"
+  die "malformed rules file: $RULES - $location profiles whose harness lacks one authoritative provider family require provider: $harness"
+fi
+
 # ---- harness -> provider map, from the single owner in fm-quota-axi-lib.sh -----
-# Multi-provider harnesses always require an explicit profile provider, so this
-# map is only a convenience for single-provider harnesses.
 PMAP='{}'
 while IFS=$'\t' read -r h m; do
   [ -n "$h" ] || continue
-  p=$(fm_quota_provider_for_harness "$h" "$m" 2>/dev/null) || p=''
+  p=$(fm_quota_single_provider_for_harness "$h" 2>/dev/null) || p=''
   PMAP=$(jq -c --arg k "$h|$m" --arg p "$p" '. + {($k): (if $p == "" then null else $p end)}' <<<"$PMAP")
 done < <(jq -r '
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -244,11 +254,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
   def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
   def rows($p): (prov($p) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
-  def multi_provider($h): ["pi","pi-signed","omp","opencode"] | index($h) != null;
-  def provider_of($c):
-    if multi_provider($c.harness) then ($c.provider // null)
-    else ($c.provider // $pmap["\($c.harness)|\($c.model // "")"] // null)
-    end;
+  def provider_of($c): ($c.provider // $pmap["\($c.harness)|\($c.model // "")"] // null);
   def measured($p):
     (prov($p) != null and (["known", "partial"] | index(prov($p).quotaSemantics.status)) != null);
   def applicable($p; $m):
