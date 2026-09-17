@@ -90,7 +90,7 @@ write_response() {  # <path> <choice> <confidence>
   cat > "$1" <<JSON
 { "model": "jev-1.13.0",
   "answers": { "rule": { "type": "choice", "choice": "$2", "confidence": $3,
-    "probabilities": { "rule_1": 0.0, "rule_2": 0.0, "rule_3": 0.0, "rule_4": 0.0, "default": 0.0 } } },
+    "probabilities": { "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.96, "default": 0.01 } } },
   "usage": { "input_tokens": 812, "output_tokens": 60 } }
 JSON
 }
@@ -285,7 +285,14 @@ jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvai
 ]' "$QUOTA" > "$FLOOR_BOUNDS"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$FLOOR_BOUNDS"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  bounds=all_models:31%/projected_exhaustion,model:gpt-5.6-sol:10%/projected_exhaustion  -> not eligible: profile floor all_models below 50%' "a failed profile floor reports its named row while retaining all bounds"
-pass "declared provider and profile floor are applied in code"
+
+MISSING_PROFILE_FLOOR_RULES="$TMP_ROOT/missing-profile-floor-rules.json"
+jq '.rules[1].use[1].floor.scope = "model:missing"' "$RULES" > "$MISSING_PROFILE_FLOOR_RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$MISSING_PROFILE_FLOOR_RULES" --quota "$QUOTA"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=model:missing  remaining=-%  spendPriority=-  runway=-  -> not eligible: profile floor model:missing is unverifiable: not rankable' "a missing profile floor is reported as unverifiable"
+assert_not_contains "$out" 'profile floor model:missing below' "missing profile evidence is not described as a shortfall"
+assert_contains "$out" '  profile: --harness pi --model openai-codex/gpt-5.6-sol' "another candidate may clear without misrepresenting missing floor evidence"
+pass "declared provider and profile floor evidence are applied in code"
 
 # --- malformed ranking evidence is never ordered -------------------------------
 reset_log
@@ -394,6 +401,13 @@ mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
 assert_contains "$out" '  status: error' "nonnumeric probability is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must be numeric and bounded"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+jq '.answers.rule.probabilities[] = 0' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
+mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+assert_contains "$out" '  status: error' "a zero-mass probability distribution is an error outcome"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must sum to approximately one"
 reset_log
 write_response "$RESPONSE" rule_4 2
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"

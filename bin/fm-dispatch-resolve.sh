@@ -237,6 +237,7 @@ else
     (.answers.rule.probabilities | type) == "object" and
     ((.answers.rule.probabilities | keys | sort) == $choices) and
     all(.answers.rule.probabilities[]; type == "number" and . >= 0 and . <= 1) and
+    ((.answers.rule.probabilities | [.[]] | add) as $total | $total >= 0.99 and $total <= 1.01) and
     ((has("usage") | not) or
       ((.usage | type) == "object" and
        (.usage.input_tokens | type) == "number" and
@@ -282,7 +283,6 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
         else "ok"
         end
     end;
-  def floor_ok($f; $p): (floor_state($f; $p) == "none" or floor_state($f; $p) == "ok");
   def evidence($rows):
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
@@ -293,7 +293,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
     else
       (applicable($p; ($c.model // ""))) as $rows |
       (evidence($rows)) as $bounds |
-      if ($rows | length) == 0 then {profile: $c, provider: $p, bounds: $bounds, eligible: false, unknown: true, reason: "no applicable quota row for provider \($p)"}
+      (floor_state($c.floor; $p)) as $profile_floor_state |
+      if $profile_floor_state == "unknown" then
+        ([rows($p)[] | select(.scope == $c.floor.scope)] | first) as $floor_row |
+        {profile: $c, provider: $p, bounds: $bounds, scope: $c.floor.scope, pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: false, unknown: true, reason: "profile floor \($c.floor.scope) is unverifiable: not rankable"}
+      elif ($rows | length) == 0 then {profile: $c, provider: $p, bounds: $bounds, eligible: false, unknown: true, reason: "no applicable quota row for provider \($p)"}
       elif any($rows[]; .status != "known") then
         ($rows | map(select(.status != "known")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, eligible: false, unknown: true, reason: "quota row \($bad.scope) unknown: disclosed uncertainty, not rankable"}
@@ -303,10 +307,10 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
       elif any($rows[]; (.effectivePercentRemaining // 0) <= 0) then
         ($rows | map(select((.effectivePercentRemaining // 0) <= 0)) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "0% remaining at \($bad.scope)"}
-      elif (floor_ok($c.floor; $p) | not) then
+      elif $profile_floor_state == "below" then
         ([rows($p)[] | select(
           .scope == $c.floor.scope and
-          (.status != "known" or ((.effectivePercentRemaining // -1) < $c.floor.min_percent))
+          .effectivePercentRemaining < $c.floor.min_percent
         )] | first) as $floor_row |
         {profile: $c, provider: $p, bounds: $bounds, scope: ($floor_row.scope // $c.floor.scope), pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: false, reason: "profile floor \($c.floor.scope) below \($c.floor.min_percent)%"}
       elif any($rows[]; (.selection.spendPriority | type) != "number") then
