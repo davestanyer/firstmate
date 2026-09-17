@@ -146,6 +146,9 @@ rules_err=$(jq -r '
     or ($p | has("effort") and ((.effort | type) != "string" or (.effort | length) == 0))
     or ($p | has("provider") and ((.provider | type) != "string" or (.provider | length) == 0))
     or ($p | has("floor") and floor_bad(.floor; false));
+  def duplicate_profiles($items):
+    ($items | map([.harness, (.model // null), (.effort // null)] | @json)) as $keys
+    | ($keys | length) != ($keys | unique | length);
   if type != "object" then "top-level value must be an object"
   elif has("rules") and (.rules | type) != "array" then "rules must be an array"
   elif any((.rules // [])[]; type != "object") then "each rule must be an object"
@@ -154,11 +157,13 @@ rules_err=$(jq -r '
   elif any((.rules // [])[]; has("approval") and .approval != "captain") then "approval must be \"captain\" when present"
   elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider"
   elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, provider, and floor must be well formed when present"
+  elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
   elif any((.rules // [])[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
   elif any((.rules // [])[] | profiles(.use)[]; (effort_ok(.harness; .model; .effort) | not)) then "each use profile effort must be supported by its harness and model"
   elif any((.rules // [])[] | profiles(.use)[]; multi_provider(.harness) and (has("provider") | not)) then "multi-provider use profiles require provider"
   elif has("default") and (profiles(.default) | length) == 0 then "default must be a profile object or non-empty profile array"
   elif has("default") and any(profiles(.default)[]; profile_bad(.)) then "each default profile needs harness; model, effort, provider, and floor must be well formed when present"
+  elif has("default") and duplicate_profiles(profiles(.default)) then "default must not contain duplicate harness, model, and effort profiles"
   elif has("default") and any(profiles(.default)[]; (verified(.harness) | not)) then "each default profile must name a verified harness"
   elif has("default") and any(profiles(.default)[]; (effort_ok(.harness; .model; .effort) | not)) then "each default profile effort must be supported by its harness and model"
   elif has("default") and any(profiles(.default)[]; multi_provider(.harness) and (has("provider") | not)) then "multi-provider default profiles require provider"
@@ -227,7 +232,11 @@ else
   jq -e '(.answers.rule.choice | type) == "string" and
     (.answers.rule.confidence | type) == "number" and
     .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
-    (.answers.rule.probabilities | type) == "object"' \
+    (.answers.rule.probabilities | type) == "object" and
+    ((has("usage") | not) or
+      ((.usage | type) == "object" and
+       (.usage.input_tokens | type) == "number" and
+       (.usage.output_tokens | type) == "number"))' \
     "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 fi
 
@@ -339,7 +348,7 @@ if [ "$JSON" = 1 ]; then
   printf '%s\n' "$RESULT"
   exit 0
 fi
-jq -r '
+TEXT=$(jq -r '
   "dispatch-resolve:",
   "  status: \(.status)",
   "  model: \(.model // "-")   latency_ms: \(.latency_ms // "-")   tokens: \(.tokens.input_tokens // "-")/\(.tokens.output_tokens // "-")",
@@ -354,5 +363,6 @@ jq -r '
       + "  -> " + (if .eligible then "eligible" else "not eligible: \(.reason)" end)),
   (if .chosen then "  profile: --harness \(.chosen.profile.harness)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model)" else "" end)
-      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort)" else "" end) else empty end)' <<<"$RESULT"
+      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+printf '%s\n' "$TEXT"
 exit 0
