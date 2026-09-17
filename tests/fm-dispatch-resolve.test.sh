@@ -253,8 +253,18 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its authoritative quota provider"
 assert_contains "$out" '  profile: --harness agy' "provider-less agy default resolves"
 assert_absent "$LOG/argv" "agy default-only resolution never calls curl"
+
+cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"default":0.94}}},"usage":{"input_tokens":812,"output_tokens":60}}
+JSON
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "the documented example passes opted-in resolution"
+assert_contains "$out" 'candidate: pi:anthropic/claude-sonnet-5  provider=claude' "the documented Pi default uses its declared Claude provider"
+assert_not_contains "$err" 'malformed rules file' "the documented example reaches resolution"
 cp "$BASE_RULES" "$RULES"
-pass "default-only, empty-rules, and agy configurations resolve without an API call"
+pass "default-only, Agy, and documented configurations resolve"
 
 # --- ambiguous: fixed confidence floor -----------------------------------------
 reset_log
