@@ -3,8 +3,7 @@
 # profile from a task brief with typesafe.ai's System One model (Jev), opt-in.
 #
 # Usage:
-#   fm-dispatch-resolve.sh <brief-file> [--project <name>] [--rules <path>]
-#                          [--quota <quota-axi --json file>] [--json]
+#   fm-dispatch-resolve.sh <brief-file> [--project <name>]
 #
 # Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
 #   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
@@ -28,7 +27,7 @@
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
-# Output (stdout, TOON-style block; --json prints the same as one object):
+# Output (stdout, TOON-style block):
 #   dispatch-resolve:
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
@@ -41,8 +40,8 @@
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief or rules,
-#   malformed rules file, missing jq or curl), which is actionable, never
-#   selected around.
+#   malformed rules file, or missing jq), which is actionable, never selected
+#   around.
 #
 # Environment:
 #   TYPESAFE_API_KEY, TYPESAFE_BASE_URL (default https://api.typesafe.ai),
@@ -82,13 +81,10 @@ usage() {
   ' "$0"
 }
 
-BRIEF='' PROJECT='' RULES="$CONFIG/crew-dispatch.json" QUOTA='' JSON=0
+BRIEF='' PROJECT='' RULES="$CONFIG/crew-dispatch.json"
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
-    --rules) [ $# -ge 2 ] || die "--rules needs a path"; RULES=$2; shift 2 ;;
-    --quota) [ $# -ge 2 ] || die "--quota needs a path"; QUOTA=$2; shift 2 ;;
-    --json) JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown flag $1" ;;
     *) [ -z "$BRIEF" ] || die "one brief file only"; BRIEF=$1; shift ;;
@@ -189,23 +185,20 @@ RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 emit_error() {
   local reason=$1
   echo "dispatch-resolve: error ($reason)" >&2
-  if [ "$JSON" = 1 ]; then
-    jq -n --arg reason "$reason" '{status: "error", reason: $reason}'
-  else
-    printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
-  fi
+  printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
   exit 0
 }
 
 RESP_FILE=$(mktemp) || die "mktemp failed"
-trap 'rm -f "$RESP_FILE"' EXIT
+QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
+trap 'rm -f "$RESP_FILE" "$QUOTA"' EXIT
 DIRECT=false
 LAT_MS=null
 if [ "$RULE_COUNT" -eq 0 ]; then
   DIRECT=true
   jq -n '{model: null, answers: {rule: {choice: "default", confidence: null, probabilities: {default: 1}}}, usage: null}' > "$RESP_FILE"
 else
-  command -v curl >/dev/null 2>&1 || die "curl required"
+  command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
@@ -246,13 +239,9 @@ else
 fi
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
-if [ -z "$QUOTA" ]; then
-  QUOTA=$(mktemp) || die "mktemp failed"
-  trap 'rm -f "$RESP_FILE" "$QUOTA"' EXIT
-  command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
-  quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
-fi
-fm_quota_json_valid < "$QUOTA" || emit_error "quota snapshot is not valid quota-axi --json: $QUOTA"
+command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
+quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
+fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson direct "$DIRECT" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
@@ -359,10 +348,6 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
     end
   end') || emit_error "resolution failed"
 
-if [ "$JSON" = 1 ]; then
-  printf '%s\n' "$RESULT"
-  exit 0
-fi
 TEXT=$(jq -r '
   "dispatch-resolve:",
   "  status: \(.status)",

@@ -4,8 +4,8 @@
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
 # read from file descriptor 3, and answers with a canned typesafe.ai response.
-# A fake quota-axi serves the schema-5 fixture for the no --quota path. No case
-# touches the network, and the absent-key case proves the tool makes no call
+# A fake quota-axi serves the selected schema-5 fixture. No case touches the
+# network, and the absent-key case proves the tool makes no call
 # at all.
 set -u
 
@@ -16,19 +16,24 @@ TOOL="$ROOT/bin/fm-dispatch-resolve.sh"
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-resolve)
 HOME_DIR="$TMP_ROOT/home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+NO_CURL_BIN="$TMP_ROOT/no-curl-bin"
 LOG="$TMP_ROOT/log"
 BRIEF="$TMP_ROOT/brief.md"
-RULES="$TMP_ROOT/rules.json"
+BASE_RULES="$TMP_ROOT/rules.json"
+RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
-mkdir -p "$HOME_DIR/config" "$LOG"
+mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
+for command_name in bash dirname jq mktemp rm; do
+  ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
+done
 
 cat > "$BRIEF" <<'MD'
 # Task
 Fix the off-by-one in the pager: root cause is the `<=` on line 40 of pager.sh, expected behavior is one page per call.
 MD
 
-cat > "$RULES" <<'JSON'
+cat > "$BASE_RULES" <<'JSON'
 {
   "rules": [
     {
@@ -64,6 +69,7 @@ cat > "$RULES" <<'JSON'
   ]
 }
 JSON
+cp "$BASE_RULES" "$RULES"
 
 write_quota() {  # <path> <cursor spendPriority> [<claude all_models spendPriority>]
   local path=$1 cursor=$2 claude=${3:--0.4627}
@@ -147,13 +153,23 @@ run() {
   printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
 }
 
+run_without_curl() {
+  local __exit=$1 __out=$2 __err=$3 _out _code
+  shift 3
+  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _code=$?
+  printf -v "$__exit" '%s' "$_code"
+  printf -v "$__out" '%s' "$_out"
+  printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
+}
+
 KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
 
 # --- absent key: off, silent on stdout, no network, no quota read -----------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
-run code out err "$BRIEF" --project pager --rules "$RULES"
+run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "absent key exits 0"
 assert_equals '' "$out" "absent key prints nothing on stdout"
 assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "absent key explains itself on stderr"
@@ -164,20 +180,26 @@ pass "absent key is off: one stderr line, exit 0, no network call"
 # --- .env key, and the environment wins over it ------------------------------
 printf '%s\n' '# local secrets' 'FMX_PAIRING_TOKEN=abc' "export TYPESAFE_API_KEY=\"$KEY\"" > "$HOME_DIR/.env"
 reset_log
-run code out err "$BRIEF" --project pager --rules "$RULES" --quota "$QUOTA"
+run code out err "$BRIEF" --project pager
 expect_code 0 "$code" ".env key resolves"
 assert_contains "$out" '  status: clear' ".env key produces a clear result"
 assert_contains "$(cat "$LOG/header")" "Authorization: Bearer $KEY" ".env key reaches curl on the fd header"
 reset_log
-TYPESAFE_API_KEY=env-wins run code out err "$BRIEF" --project pager --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=env-wins run code out err "$BRIEF" --project pager
 assert_equals 'Authorization: Bearer env-wins' "$(cat "$LOG/header")" "environment key wins over .env"
 rm -f "$HOME_DIR/.env"
-pass "TYPESAFE_API_KEY= in .env activates the tool; environment takes precedence"
+OVERRIDE_CONFIG="$TMP_ROOT/override-config"
+mkdir -p "$OVERRIDE_CONFIG"
+cp "$BASE_RULES" "$OVERRIDE_CONFIG/crew-dispatch.json"
+reset_log
+TYPESAFE_API_KEY=$KEY FM_CONFIG_OVERRIDE="$OVERRIDE_CONFIG" run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' "FM_CONFIG_OVERRIDE selects the canonical rules directory"
+pass "TYPESAFE_API_KEY= in .env activates the tool; environment and config overrides work"
 
 # --- clear: request shape, secret handling, argmax --------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL=https://stub.invalid run code out err "$BRIEF" --project pager --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL=https://stub.invalid run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "clear exits 0"
 assert_contains "$out" 'dispatch-resolve:' "TOON block header"
 assert_contains "$out" '  status: clear' "clear status"
@@ -204,50 +226,41 @@ assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
 
-# --- --json ------------------------------------------------------------------
-reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager --rules "$RULES" --quota "$QUOTA" --json
-expect_code 0 "$code" "--json exits 0"
-assert_equals 'clear' "$(jq -r .status <<<"$out")" "--json status"
-assert_equals 'rule_4' "$(jq -r .rule <<<"$out")" "--json rule"
-assert_equals 'cursor' "$(jq -r .chosen.profile.harness <<<"$out")" "--json chosen harness"
-assert_equals '3' "$(jq -r '.candidates | length' <<<"$out")" "--json lists every candidate"
-assert_equals '812' "$(jq -r .tokens.input_tokens <<<"$out")" "--json carries usage"
-pass "--json prints the same result as one object"
-
 # --- default-only configurations resolve without a model request ---------------
 DEFAULT_ONLY="$TMP_ROOT/default-only.json"
 EMPTY_RULES="$TMP_ROOT/empty-rules.json"
 printf '%s\n' '{"default":[{"harness":"claude","model":"opus"},{"harness":"cursor","model":"cursor-grok-4.6-high"}]}' > "$DEFAULT_ONLY"
 printf '%s\n' '{"rules":[],"default":[{"harness":"claude","model":"opus"},{"harness":"cursor","model":"cursor-grok-4.6-high"}]}' > "$EMPTY_RULES"
 for direct_rules in "$DEFAULT_ONLY" "$EMPTY_RULES"; do
+  cp "$direct_rules" "$RULES"
   reset_log
-  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$direct_rules" --quota "$QUOTA" --json
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
   expect_code 0 "$code" "default-only resolution exits 0: $direct_rules"
-  assert_equals 'clear' "$(jq -r .status <<<"$out")" "default-only resolution is clear: $direct_rules"
-  assert_equals 'default' "$(jq -r .rule <<<"$out")" "default-only resolution selects default: $direct_rules"
-  assert_equals 'cursor' "$(jq -r .chosen.profile.harness <<<"$out")" "default-only resolution uses quota argmax: $direct_rules"
-  assert_equals 'true' "$(jq -r '(.latency_ms == null) and (.tokens == null)' <<<"$out")" "default-only resolution has no request latency or tokens: $direct_rules"
+  assert_contains "$out" '  status: clear' "default-only resolution is clear: $direct_rules"
+  assert_contains "$out" '  rule: default (No listed rule applies to this task.)   confidence: null' "default-only resolution selects default without model evidence: $direct_rules"
+  assert_contains "$out" '  model: -   latency_ms: -   tokens: -/-' "default-only resolution has no request latency or tokens: $direct_rules"
+  assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-high' "default-only resolution uses quota argmax: $direct_rules"
   assert_absent "$LOG/argv" "default-only resolution never calls curl: $direct_rules"
 done
+cp "$BASE_RULES" "$RULES"
 pass "default-only and empty-rules configurations resolve without an API call"
 
 # --- ambiguous: confidence floor, overridable ---------------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.41
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "ambiguous exits 0"
 assert_contains "$out" '  status: ambiguous' "below the floor is ambiguous"
 assert_contains "$out" '  reason: confidence 0.41 below floor 0.6' "ambiguous names the floor"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
-TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_FLOOR=0.3 run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_FLOOR=0.3 run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "FM_DISPATCH_RESOLVE_FLOOR lowers the floor"
 pass "ambiguous: confidence below the floor hands the decision back"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log
 write_response "$RESPONSE" rule_3 0.95
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "escalate exits 0"
 assert_contains "$out" '  status: escalate' "approval-gated rule escalates"
 assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "escalate names the approval gate"
@@ -257,7 +270,7 @@ pass "escalate: a rule declared approval: captain never yields a profile"
 # --- rule floor fails: fall through to default -------------------------------
 reset_log
 write_response "$RESPONSE" rule_1 0.97
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "rule floor fall-through still resolves"
 assert_contains "$out" '  note: rule rule_1 floor model:fable below 20%: fall through to default' "rule floor fall-through is explained"
 assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-high' "fall-through resolves among the default profiles"
@@ -265,7 +278,7 @@ assert_not_contains "$out" 'candidate: claude:fable' "the floored rule's own pro
 
 MISSING_RULE_FLOOR="$TMP_ROOT/missing-rule-floor.json"
 jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability) |= map(select(.scope != "model:fable"))' "$QUOTA" > "$MISSING_RULE_FLOOR"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$MISSING_RULE_FLOOR"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$MISSING_RULE_FLOOR" run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "an unverifiable rule floor escalates"
 assert_contains "$out" '  reason: rule rule_1 floor claude/model:fable is unverifiable' "the unverifiable rule floor names its provider and scope"
 assert_not_contains "$out" '  profile:' "an unverifiable rule floor never authorizes default routing"
@@ -274,7 +287,7 @@ pass "rule floor: known shortfall falls through while unavailable evidence escal
 # --- declared provider and profile floor --------------------------------------
 reset_log
 write_response "$RESPONSE" rule_2 0.99
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%' "declared provider routes a Pi profile to the codex row"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  -> not eligible: profile floor all_models below 50%' "profile floor makes a candidate ineligible with its reason"
 assert_contains "$out" '  profile: --harness pi --model openai-codex/gpt-5.6-sol' "the remaining eligible candidate wins"
@@ -283,15 +296,17 @@ FLOOR_BOUNDS="$TMP_ROOT/floor-bounds.json"
 jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability) += [
   {"scope":"model:gpt-5.6-sol","status":"known","effectivePercentRemaining":10,"runway":{"status":"projected_exhaustion"},"selection":{"spendPriority":-0.9}}
 ]' "$QUOTA" > "$FLOOR_BOUNDS"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$FLOOR_BOUNDS"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$FLOOR_BOUNDS" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  bounds=all_models:31%/projected_exhaustion,model:gpt-5.6-sol:10%/projected_exhaustion  -> not eligible: profile floor all_models below 50%' "a failed profile floor reports its named row while retaining all bounds"
 
 MISSING_PROFILE_FLOOR_RULES="$TMP_ROOT/missing-profile-floor-rules.json"
-jq '.rules[1].use[1].floor.scope = "model:missing"' "$RULES" > "$MISSING_PROFILE_FLOOR_RULES"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$MISSING_PROFILE_FLOOR_RULES" --quota "$QUOTA"
+jq '.rules[1].use[1].floor.scope = "model:missing"' "$BASE_RULES" > "$MISSING_PROFILE_FLOOR_RULES"
+cp "$MISSING_PROFILE_FLOOR_RULES" "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=model:missing  remaining=-%  spendPriority=-  runway=-  -> not eligible: profile floor model:missing is unverifiable: not rankable' "a missing profile floor is reported as unverifiable"
 assert_not_contains "$out" 'profile floor model:missing below' "missing profile evidence is not described as a shortfall"
 assert_contains "$out" '  profile: --harness pi --model openai-codex/gpt-5.6-sol' "another candidate may clear without misrepresenting missing floor evidence"
+cp "$BASE_RULES" "$RULES"
 pass "declared provider and profile floor evidence are applied in code"
 
 # --- malformed ranking evidence is never ordered -------------------------------
@@ -299,7 +314,7 @@ reset_log
 NONNUMERIC="$TMP_ROOT/nonnumeric-spend-priority.json"
 jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .selection.spendPriority) = "high"' "$QUOTA" > "$NONNUMERIC"
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$NONNUMERIC"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NONNUMERIC" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=-  runway=through_reset  -> not eligible: spendPriority missing or non-numeric at all_models: not rankable' "a nonnumeric spendPriority is unrankable"
 assert_contains "$out" '  profile: --harness claude --model sonnet --effort high' "numeric evidence wins without mixed-type ordering"
 pass "nonnumeric spendPriority evidence is never ranked"
@@ -311,13 +326,13 @@ jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAva
   {"scope":"model:sonnet","status":"known","effectivePercentRemaining":99,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.9}}
 ]' "$QUOTA" > "$BOUNDED"
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$BOUNDED"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$BOUNDED" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627' "the limiting provider-wide row drives ranking"
 assert_contains "$out" 'bounds=all_models:79%/projected_exhaustion,model:sonnet:99%/through_reset' "all applicable quota bounds are disclosed"
 
 EXHAUSTED_WIDE="$TMP_ROOT/exhausted-wide.json"
 jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models")) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$BOUNDED" > "$EXHAUSTED_WIDE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$EXHAUSTED_WIDE"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$EXHAUSTED_WIDE" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=0%' "the exhausted account-wide bound is the candidate evidence"
 assert_contains "$out" '-> not eligible: runway exhausted_now at all_models' "a healthy exact row cannot bypass an exhausted account-wide bound"
 pass "provider-wide and exact quota rows combine into one limiting candidate"
@@ -325,7 +340,7 @@ pass "provider-wide and exact quota rows combine into one limiting candidate"
 # --- default choice ------------------------------------------------------------
 reset_log
 write_response "$RESPONSE" default 0.88
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  rule: default (No listed rule applies to this task.)' "default names the fixed neutral none option"
 assert_contains "$out" '  note: no rule matched' "default is explained"
 assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-high' "default resolves by argmax"
@@ -336,7 +351,7 @@ reset_log
 TIE="$TMP_ROOT/tie.json"
 write_quota "$TIE" 0.5 0.5
 write_response "$RESPONSE" default 0.88
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$TIE"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TIE" run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "tie escalates"
 assert_contains "$out" '  reason: genuine spendPriority tie' "tie is named"
 pass "tie: equal spendPriority never breaks by array order"
@@ -345,21 +360,21 @@ pass "tie: equal spendPriority never breaks by array order"
 reset_log
 NONE="$TMP_ROOT/none.json"
 jq '.providers |= map(if .provider == "cursor" or .provider == "claude" then .quotaSemantics.effectiveAvailability |= map(.runway.status = "exhausted_now") else . end)' "$QUOTA" > "$NONE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$NONE"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NONE" run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "no rankable candidate escalates"
 assert_contains "$out" '  reason: no rankable eligible candidate' "no-candidate reason"
 assert_contains "$out" '-> not eligible: runway exhausted_now' "exhausted candidates keep their reason"
 pass "no rankable candidate: the tool escalates instead of guessing"
 
-# --- quota-axi is read once when no --quota is given -------------------------------
+# --- quota-axi is read exactly once --------------------------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi path exits 0"
 assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "quota-axi --json is called exactly once"
 assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-medium' "quota-axi snapshot drives the argmax"
 reset_log
-TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF" --rules "$RULES"
+TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi failure exits 0"
 assert_contains "$out" '  status: error' "quota-axi failure is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json failed' "quota-axi failure is named"
@@ -367,75 +382,82 @@ pass "quota evidence comes from one quota-axi --json read, and its failure is an
 
 # --- API and response failures are error outcomes, exit 0 ----------------------
 reset_log
-TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=429 run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+run_without_curl code out err "$BRIEF"
+expect_code 0 "$code" "missing curl exits 0"
+assert_contains "$out" '  status: error' "missing curl is a structured error outcome"
+assert_contains "$out" '  reason: curl not installed' "missing curl is named in the TOON block"
+assert_contains "$err" 'dispatch-resolve: error (curl not installed)' "missing curl is also reported on stderr"
+reset_log
+TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=429 run code out err "$BRIEF"
 expect_code 0 "$code" "http 429 exits 0"
 assert_contains "$out" '  status: error' "http 429 is an error outcome"
 assert_contains "$out" '  reason: http 429 after' "http status is reported"
 assert_contains "$err" 'dispatch-resolve: error (http 429' "error also goes to stderr"
 reset_log
-TYPESAFE_API_KEY=$KEY FAKE_CURL_FAIL=1 run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY FAKE_CURL_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "curl failure exits 0"
 assert_contains "$out" '  reason: http 000 after' "transport failure reads as http 000"
 reset_log
 printf '%s\n' '{"model":"jev","answers":{}}' > "$RESPONSE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "a malformed answer is an error outcome"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.usage = "bad"' "$RESPONSE" > "$TMP_ROOT/malformed-usage.json"
 mv "$TMP_ROOT/malformed-usage.json" "$RESPONSE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "malformed usage is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "malformed usage cannot break text rendering silently"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq 'del(.answers.rule.probabilities.default)' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
 mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "missing probability choice is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must name every offered choice"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.answers.rule.probabilities.rule_4 = "high"' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
 mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "nonnumeric probability is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must be numeric and bounded"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.answers.rule.probabilities[] = 0' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
 mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "a zero-mass probability distribution is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must sum to approximately one"
 reset_log
 write_response "$RESPONSE" rule_4 2
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "out-of-range confidence is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "out-of-range confidence is a malformed answer"
 reset_log
 write_response "$RESPONSE" rule_9 0.9
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "an unknown rule id is an error outcome"
 assert_contains "$out" '  reason: rule rule_9 is not in the rules file' "unknown rule id is named"
 write_response "$RESPONSE" rule_0 0.9
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "rule zero is an error outcome"
 assert_contains "$out" '  reason: rule rule_0 is not in the rules file' "rule zero cannot alias the final rule"
 reset_log
-TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA" --json
-assert_equals 'error' "$(jq -r .status <<<"$out")" "--json error status"
+TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "http 500 is a TOON error outcome"
 pass "API, transport, and response failures are error outcomes with exit 0"
 
 # --- configuration errors exit 2 and select nothing ----------------------------------
 reset_log
-TYPESAFE_API_KEY=$KEY run code out err --rules "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err
 expect_code 2 "$code" "missing brief exits 2"
 assert_contains "$err" 'brief file required' "missing brief is named"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$TMP_ROOT/missing.json"
-expect_code 2 "$code" "missing rules file exits 2"
-printf '%s\n' '{"rules":[' > "$TMP_ROOT/broken.json"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$TMP_ROOT/broken.json"
+rm -f "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "missing canonical rules file exits 2"
+printf '%s\n' '{"rules":[' > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 2 "$code" "non-JSON rules exits 2"
 assert_contains "$err" 'not JSON' "non-JSON rules is named"
 for bad in \
@@ -449,18 +471,24 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
   '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|multi-provider use profiles require provider' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|multi-provider default profiles require provider'; do
-  printf '%s\n' "${bad%%|*}" > "$TMP_ROOT/bad.json"
-  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$TMP_ROOT/bad.json" --quota "$QUOTA"
+  printf '%s\n' "${bad%%|*}" > "$RULES"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
   expect_code 2 "$code" "malformed rules exit 2: ${bad#*|}"
-  assert_contains "$err" "malformed rules file: $TMP_ROOT/bad.json - ${bad#*|}" "malformed rules are named: ${bad#*|}"
+  assert_contains "$err" "malformed rules file: $RULES - ${bad#*|}" "malformed rules are named: ${bad#*|}"
 done
 assert_absent "$LOG/argv" "configuration errors never reach the network"
+cp "$BASE_RULES" "$RULES"
 for floor in 1.01 0.6junk -0.1; do
-  TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_FLOOR=$floor run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+  TYPESAFE_API_KEY=$KEY FM_DISPATCH_RESOLVE_FLOOR=$floor run code out err "$BRIEF"
   expect_code 2 "$code" "invalid confidence floor exits 2: $floor"
   assert_contains "$err" 'FM_DISPATCH_RESOLVE_FLOOR must be a number between 0 and 1' "invalid confidence floor is named: $floor"
 done
 assert_absent "$LOG/argv" "invalid confidence floors fail before the network"
+for removed in --json --rules --quota; do
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" "$removed"
+  expect_code 2 "$code" "removed option is rejected: $removed"
+  assert_contains "$err" "unknown flag $removed" "removed option has no public path: $removed"
+done
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --bogus
 expect_code 2 "$code" "unknown flag exits 2"
 run code out err --help
