@@ -146,8 +146,10 @@ rules_err=$(jq -r '
     ($f | type) != "object"
     or (($f.scope | type) != "string") or (($f.scope | length) == 0)
     or (($f.min_percent | type) != "number") or ($f.min_percent < 0) or ($f.min_percent > 100)
-    or ($f | has("provider") and ((.provider | type) != "string" or (.provider | length) == 0))
-    or ($need_provider and ($f | has("provider") | not));
+    or (if $need_provider
+        then (($f.provider | type) != "string" or ($f.provider | length) == 0)
+        else ($f | has("provider"))
+        end);
   def profile_bad($p):
     ($p | type) != "object"
     or (($p.harness | type) != "string") or (($p.harness | length) == 0)
@@ -284,12 +286,12 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --arg lat "$LAT_MS" --arg none_cr
       elif any($rows[]; (.effectivePercentRemaining // 0) <= 0) then
         ($rows | map(select((.effectivePercentRemaining // 0) <= 0)) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "0% remaining at \($bad.scope)"}
-      elif (floor_ok($c.floor; ($c.floor.provider // $p)) | not) then
+      elif (floor_ok($c.floor; $p) | not) then
         ($rows | min_by(.effectivePercentRemaining)) as $limiting |
         {profile: $c, provider: $p, bounds: $bounds, scope: $limiting.scope, pct: $limiting.effectivePercentRemaining, runway: $limiting.runway.status, eligible: false, reason: "profile floor \($c.floor.scope) below \($c.floor.min_percent)%"}
-      elif any($rows[]; (.selection.spendPriority // null) == null) then
-        ($rows | map(select((.selection.spendPriority // null) == null)) | first) as $bad |
-        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "spendPriority unknown at \($bad.scope): not rankable"}
+      elif any($rows[]; (.selection.spendPriority | type) != "number") then
+        ($rows | map(select((.selection.spendPriority | type) != "number")) | first) as $bad |
+        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "spendPriority missing or non-numeric at \($bad.scope): not rankable"}
       else
         ($rows | min_by(.selection.spendPriority)) as $limiting |
         {profile: $c, provider: $p, bounds: $bounds, scope: $limiting.scope, pct: $limiting.effectivePercentRemaining,

@@ -261,6 +261,16 @@ assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_
 assert_contains "$out" '  profile: --harness pi --model openai-codex/gpt-5.6-sol' "the remaining eligible candidate wins"
 pass "declared provider and profile floor are applied in code"
 
+# --- malformed ranking evidence is never ordered -------------------------------
+reset_log
+NONNUMERIC="$TMP_ROOT/nonnumeric-spend-priority.json"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .selection.spendPriority) = "high"' "$QUOTA" > "$NONNUMERIC"
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$NONNUMERIC"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=-  runway=through_reset  -> not eligible: spendPriority missing or non-numeric at all_models: not rankable' "a nonnumeric spendPriority is unrankable"
+assert_contains "$out" '  profile: --harness claude --model sonnet --effort high' "numeric evidence wins without mixed-type ordering"
+pass "nonnumeric spendPriority evidence is never ranked"
+
 # --- provider-wide rows remain bounds beside exact model rows ------------------
 reset_log
 BOUNDED="$TMP_ROOT/bounded.json"
@@ -366,6 +376,7 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, provider, and floor must be well formed when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":20,"provider":"claude"}}}]}|each use profile needs harness; model, effort, provider, and floor must be well formed when present' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
   '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|multi-provider use profiles require provider' \

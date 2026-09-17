@@ -1149,8 +1149,10 @@ crew_dispatch_validate() {
       ($f | type) != "object"
       or (($f.scope | type) != "string") or (($f.scope | length) == 0)
       or (($f.min_percent | type) != "number") or ($f.min_percent < 0) or ($f.min_percent > 100)
-      or ($f | has("provider") and (((.provider | type) != "string") or (.provider | length) == 0))
-      or ($need_provider and ($f | has("provider") | not));
+      or (if $need_provider
+          then (($f.provider | type) != "string" or ($f.provider | length) == 0)
+          else ($f | has("provider"))
+          end);
     def malformed_profile_floors($items):
       ($items | any(has("floor") and floor_bad(.floor; false)));
     def bad_efforts:
