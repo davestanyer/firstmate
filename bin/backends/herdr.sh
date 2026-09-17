@@ -3078,24 +3078,8 @@ fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   local path
   if fm_platform_is_msys; then
-    # foreground_cwd ONLY, never a fall back to .cwd.
-    #
-    # Windows reports no foreground working directory for a pane, which callers
-    # read as "this platform cannot answer" and correctly treat as no evidence.
-    # `.cwd` is a different fact: the directory the pane was CREATED in, which
-    # Herdr keeps reporting unchanged after the shell moves. Herdr 0.8.2 left it
-    # null here so the fall back was inert, but 0.9.0-preview populates it, and
-    # falling back then converts "cannot answer" into a confident wrong answer.
-    #
-    # That breaks the caller that matters: spawn_confirm_pane_worktree treats a
-    # NON-empty read as a real verdict, so every ship and scout spawn refuses
-    # with "the endpoint stayed in <primary checkout>" even though the worktree
-    # was leased correctly and the agent would have started in it. Verified on
-    # herdr 0.9.0-preview.2026-09-08: foreground_cwd null, cwd the primary
-    # checkout. Isolation itself is unaffected - it is proven against the
-    # filesystem before this runs, with the brief's own assertion as backstop.
     path=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
-      | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null)
+      | jq -r '.result.pane.foreground_cwd // .result.pane.cwd // empty' 2>/dev/null)
     [ -n "$path" ] || return 0
     path=$(fm_path_posix "$path")
     [ "$path" = / ] || path=${path%/}
