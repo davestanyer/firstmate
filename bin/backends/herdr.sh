@@ -3743,7 +3743,14 @@ fm_backend_herdr_events_capable() {  # <session>
   esac
   fm_backend_herdr_tool_check || return 1
   if [ -z "${FM_BACKEND_HERDR_EVENT_READER:-}" ]; then
-    command -v python3 >/dev/null 2>&1 || return 1
+    # Windows runs the node reader instead, so it asks for node. win32 CPython
+    # exposes no AF_UNIX at all, and herdr serves a named pipe rather than a
+    # Unix socket there anyway; herdr-eventwait.mjs owns that reasoning.
+    if fm_platform_is_msys; then
+      command -v node >/dev/null 2>&1 || return 1
+    else
+      command -v python3 >/dev/null 2>&1 || return 1
+    fi
   fi
   protocol=$(herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
@@ -3774,6 +3781,13 @@ fm_backend_herdr_event_reader_cmd() {
     for word in $FM_BACKEND_HERDR_EVENT_READER; do
       printf '%s\n' "$word"
     done
+    return 0
+  fi
+  # Same wire protocol either way; only the transport differs, so the caller
+  # cannot tell the two readers apart from their output or exit status.
+  if fm_platform_is_msys; then
+    printf 'node\n'
+    printf '%s\n' "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-eventwait.mjs"
     return 0
   fi
   printf 'python3\n'
