@@ -197,7 +197,7 @@ assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides i
 assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the whole brief rides in the state"
 assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
 assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' "$(jq -c '.questions.rule.criteria | keys' <<<"$body")" "one option per rule plus default"
-assert_equals "No listed rule applies. Ordinary routine work of any kind - small well-understood features, tweaks, refactors, docs, chores, reviews, investigations, and bug fixes that are not simple fixes with an explicitly stated root cause. Also use this option whenever a rule's own exemption text excludes the task." "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "the fixed generic none criterion is the default option"
+assert_equals 'No listed rule applies to this task.' "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "the fixed generic none criterion is the default option"
 assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r '.questions.rule.criteria.rule_4' <<<"$body")" "rule when text is the option verbatim"
 assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine"
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
@@ -214,6 +214,23 @@ assert_equals 'cursor' "$(jq -r .chosen.profile.harness <<<"$out")" "--json chos
 assert_equals '3' "$(jq -r '.candidates | length' <<<"$out")" "--json lists every candidate"
 assert_equals '812' "$(jq -r .tokens.input_tokens <<<"$out")" "--json carries usage"
 pass "--json prints the same result as one object"
+
+# --- default-only configurations resolve without a model request ---------------
+DEFAULT_ONLY="$TMP_ROOT/default-only.json"
+EMPTY_RULES="$TMP_ROOT/empty-rules.json"
+printf '%s\n' '{"default":[{"harness":"claude","model":"opus"},{"harness":"cursor","model":"cursor-grok-4.6-high"}]}' > "$DEFAULT_ONLY"
+printf '%s\n' '{"rules":[],"default":[{"harness":"claude","model":"opus"},{"harness":"cursor","model":"cursor-grok-4.6-high"}]}' > "$EMPTY_RULES"
+for direct_rules in "$DEFAULT_ONLY" "$EMPTY_RULES"; do
+  reset_log
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$direct_rules" --quota "$QUOTA" --json
+  expect_code 0 "$code" "default-only resolution exits 0: $direct_rules"
+  assert_equals 'clear' "$(jq -r .status <<<"$out")" "default-only resolution is clear: $direct_rules"
+  assert_equals 'default' "$(jq -r .rule <<<"$out")" "default-only resolution selects default: $direct_rules"
+  assert_equals 'cursor' "$(jq -r .chosen.profile.harness <<<"$out")" "default-only resolution uses quota argmax: $direct_rules"
+  assert_equals 'true' "$(jq -r '(.latency_ms == null) and (.tokens == null)' <<<"$out")" "default-only resolution has no request latency or tokens: $direct_rules"
+  assert_absent "$LOG/argv" "default-only resolution never calls curl: $direct_rules"
+done
+pass "default-only and empty-rules configurations resolve without an API call"
 
 # --- ambiguous: confidence floor, overridable ---------------------------------
 reset_log
@@ -295,7 +312,7 @@ pass "provider-wide and exact quota rows combine into one limiting candidate"
 reset_log
 write_response "$RESPONSE" default 0.88
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
-assert_contains "$out" '  rule: default (No listed rule applies.' "default names the fixed generic none option"
+assert_contains "$out" '  rule: default (No listed rule applies to this task.)' "default names the fixed neutral none option"
 assert_contains "$out" '  note: no rule matched' "default is explained"
 assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-high' "default resolves by argmax"
 pass "default: no rule matched resolves among the default profiles"
@@ -386,8 +403,7 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":20,"provider":"claude"}}}]}|each use profile needs harness; model, effort, provider, and floor must be well formed when present' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
-  '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|multi-provider use profiles require provider' \
-  '{"rules":[]}|rules must be a non-empty array'; do
+  '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|multi-provider use profiles require provider'; do
   printf '%s\n' "${bad%%|*}" > "$TMP_ROOT/bad.json"
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$TMP_ROOT/bad.json" --quota "$QUOTA"
   expect_code 2 "$code" "malformed rules exit 2: ${bad#*|}"

@@ -19,7 +19,7 @@ The cookbooks price `jev-1.12` at $0.042 per million input tokens; there is no p
 ## Live rule match against real briefs
 
 Run 2026-09-16 with the key injected for the one command through the vault (`av inject +TYPESAFE_API_KEY -- ...`), model `jev-latest`, confidence floor 0.6, timeout 5 s, one `quota-axi --json` snapshot for the whole run.
-Rules: the captain's five-rule file with one fixed generic none option, one `approval: captain` rule, two rule floors on `model:fable`, and declared `provider` on the Pi profiles.
+Rules: the captain's five-rule file with a captain-authored none option, one `approval: captain` rule, two rule floors on `model:fable`, and declared `provider` on the Pi profiles.
 Briefs: 15 real briefs from this home's recent work plus 10 synthetic ones written to hit each rule.
 
 | Measure | Result |
@@ -36,6 +36,7 @@ Briefs: 15 real briefs from this home's recent work plus 10 synthetic ones writt
 
 Of the five disagreements, one was a wrong hand label (the brief quoted the bug-fix rule's wording verbatim), three were real briefs the model read as the approval-gated design rule at 0.66 to 0.86 confidence and escalated by design, each of which the captain had in fact dispatched at the strongest-reasoning class, and one was a synthetic tweak that came back ambiguous at 0.41 confidence and was handed back to firstmate.
 A lean request that asks only the rule Choice matched the full request (rule, profile, and status) on all 25 briefs, which is why the shipped tool asks one question and keeps every gate in code.
+That recorded agreement predates the shipped neutral `No listed rule applies to this task.` option. Agreement with the neutral sentence is re-measured as a separate live check outside the pipeline and disclosed in the PR body rather than represented by the historical table.
 
 ## What the tool replaces
 
@@ -55,7 +56,7 @@ Dispatches the tool calls ambiguous or escalates fall back to today's path and s
 ## Offline behavior
 
 `tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, and the header read from file descriptor 3, and with a fake `quota-axi`.
-It proves: firstmate can invoke the resolve path without a preflight; the absent key (environment and `.env`) prints one stderr line, nothing on stdout, exits 0, and never invokes `curl` or `quota-axi`; a `.env` key turns the tool on and the environment wins over it; the key never appears on `curl` argv and arrives only as the bearer header on the descriptor; the request carries only the model, project, brief, and the rule Choice with one option per rule plus the fixed generic none option, and never `why`, `use`, or quota; and the clear, ambiguous, escalate (approval, tie, nothing rankable), rule-floor fall-through, profile-floor evidence, declared multi-provider family, account-wide quota veto, limiting-bound ranking, unmeasured provider, `--json`, quota-axi failure, HTTP 429 and 500, transport failure, malformed or out-of-range confidence, invalid confidence floor, malformed profile, and out-of-range rule id paths behave as the contract states, with configuration errors exiting 2 before any network call.
+It proves: firstmate can invoke the resolve path without a preflight; the absent key (environment and `.env`) prints one stderr line, nothing on stdout, exits 0, and never invokes `curl` or `quota-axi`; default-only and empty-rules files resolve the default quota argmax with null request evidence and no `curl` call; a `.env` key turns the tool on and the environment wins over it; the key never appears on `curl` argv and arrives only as the bearer header on the descriptor; the request carries only the model, project, brief, and the rule Choice with one option per rule plus the fixed neutral none option, and never `why`, `use`, or quota; and the clear, ambiguous, escalate (approval, tie, nothing rankable), rule-floor fall-through, profile-floor evidence, declared multi-provider family, account-wide quota veto, limiting-bound ranking, unmeasured provider, `--json`, quota-axi failure, HTTP 429 and 500, transport failure, malformed or out-of-range confidence, invalid confidence floor, malformed profile, and out-of-range rule id paths behave as the contract states, with configuration errors exiting 2 before any network call.
 `tests/fm-bootstrap.test.sh` proves bootstrap accepts the declared fields and reports each malformed shape.
 
 ```console

@@ -440,12 +440,12 @@ This section is the single owner of the canonical schema and its per-field seman
 }
 ```
 
-Per rule, `when` and `use` are required.
+Per rule, `when` and `use` are required; the top-level `rules` array itself may be absent or empty for a default-only configuration.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
 Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
-The resolver supplies one fixed generic Choice option for work that matches no listed rule.
+The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
 A rule `floor` names the quota-axi `provider` and `scope` whose `effectivePercentRemaining` must be at least `min_percent` for the rule's profiles to apply; below it the tool resolves among `default` instead.
 A profile `provider` names the quota-axi provider family whose rows apply to that profile and is required for harnesses that serve several families (`pi`, `pi-signed`, `omp`, `opencode`); a profile `floor` contains only `scope` and `min_percent`, always uses that profile's provider, and makes that one candidate ineligible below `min_percent` on the named scope.
@@ -459,7 +459,7 @@ Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPA
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, an empty or malformed rule/default array, an unverified harness, an effort value unsupported by that harness, a multi-provider profile without `provider`, or a malformed `approval`, `floor`, or `provider` declaration is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, an effort value unsupported by that harness, a multi-provider profile without `provider`, or a malformed `approval`, `floor`, or `provider` declaration is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
@@ -475,10 +475,10 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name> --json
 ```
 
-Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome. When on, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus one fixed generic option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
+Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome. When on and at least one rule exists, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals. A default-only file or `rules: []` skips the model request and resolves the default profile set directly through the same quota ranking, with null model, latency, and token evidence.
 Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot (or a `--quota` file), and the numeric `spendPriority` argmax over candidates using each candidate's limiting row. Any exhausted or zero applicable bound makes that candidate ineligible, missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable.
 The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, nothing rankable, or a genuine tie), or `error` (API, network, response, or quota-axi failure), and every one of them exits 0.
-Only a usage or configuration error exits 2: an unreadable brief or rules file, a malformed rules file, or missing `jq` or `curl`, each reported and never selected around.
+Only a usage or configuration error exits 2: an unreadable brief or rules file, a malformed rules file, missing `jq`, or missing `curl` when at least one rule requires a model request, each reported and never selected around.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome. By accepted design, a `clear` result does not itself enforce catalog/authentication, reasoning-class, or completion-runway gates; firstmate applies those responsibilities before spawn, while every non-clear result returns to the full existing intake.
 
 The key lives in one shell variable and reaches `curl` as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.

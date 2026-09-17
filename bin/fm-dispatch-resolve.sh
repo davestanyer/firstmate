@@ -14,15 +14,17 @@
 #   The key lives in one shell variable and reaches curl as a header read from
 #   a file descriptor, never on argv; nothing logs or writes it.
 #
-# What it does when on: one POST to $TYPESAFE_BASE_URL/v1/systemone with the
-#   project name and the whole brief as state and ONE Choice question whose
+# What it does when on with at least one rule: one POST to
+#   $TYPESAFE_BASE_URL/v1/systemone with the project name and the whole brief as
+#   state and ONE Choice question whose
 #   options are every rule's `when` from config/crew-dispatch.json plus one
 #   fixed generic none option. Jev returns the matched rule, a probability per
 #   option, and a confidence. Everything after that is jq: the confidence
 #   floor, the rule's declared `approval` and `floor`, each profile's declared
 #   `provider` and `floor`, the quota rows from ONE quota-axi --json snapshot,
 #   and the spendPriority argmax over the eligible candidates. The model never
-#   sees quota, catalogs, approvals, `why`, or `use`.
+#   sees quota, catalogs, approvals, `why`, or `use`. With no rules, it skips
+#   that request and resolves the configured default profiles directly.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
@@ -69,7 +71,7 @@ CONFIDENCE_FLOOR=${FM_DISPATCH_RESOLVE_FLOOR:-0.6}
 TS_MODEL=${FM_TYPESAFE_MODEL:-jev-latest}
 TS_BASE=${TYPESAFE_BASE_URL:-https://api.typesafe.ai}
 TS_TIMEOUT=${FM_DISPATCH_RESOLVE_TIMEOUT:-5}
-DEFAULT_WHEN="No listed rule applies. Ordinary routine work of any kind - small well-understood features, tweaks, refactors, docs, chores, reviews, investigations, and bug fixes that are not simple fixes with an explicitly stated root cause. Also use this option whenever a rule's own exemption text excludes the task."
+DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 usage() {
@@ -107,7 +109,6 @@ fi
 [ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
 [ -r "$RULES" ] || die "rules file not readable: $RULES"
 command -v jq >/dev/null 2>&1 || die "jq required"
-command -v curl >/dev/null 2>&1 || die "curl required"
 jq -en --arg value "$CONFIDENCE_FLOOR" '
   ($value | test("^(0([.][0-9]+)?|1([.]0+)?)$")) and
   (($value | tonumber) >= 0 and ($value | tonumber) <= 1)
@@ -146,16 +147,16 @@ rules_err=$(jq -r '
     or ($p | has("provider") and ((.provider | type) != "string" or (.provider | length) == 0))
     or ($p | has("floor") and floor_bad(.floor; false));
   if type != "object" then "top-level value must be an object"
-  elif (.rules | type) != "array" or (.rules | length) == 0 then "rules must be a non-empty array"
-  elif any(.rules[]; type != "object") then "each rule must be an object"
-  elif any(.rules[]; (.when | type) != "string" or (.when | length) == 0) then "each rule needs non-empty when"
-  elif any(.rules[]; (profiles(.use) | length) == 0) then "each rule needs at least one use profile"
-  elif any(.rules[]; has("approval") and .approval != "captain") then "approval must be \"captain\" when present"
-  elif any(.rules[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider"
-  elif any(.rules[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, provider, and floor must be well formed when present"
-  elif any(.rules[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
-  elif any(.rules[] | profiles(.use)[]; (effort_ok(.harness; .model; .effort) | not)) then "each use profile effort must be supported by its harness and model"
-  elif any(.rules[] | profiles(.use)[]; multi_provider(.harness) and (has("provider") | not)) then "multi-provider use profiles require provider"
+  elif has("rules") and (.rules | type) != "array" then "rules must be an array"
+  elif any((.rules // [])[]; type != "object") then "each rule must be an object"
+  elif any((.rules // [])[]; (.when | type) != "string" or (.when | length) == 0) then "each rule needs non-empty when"
+  elif any((.rules // [])[]; (profiles(.use) | length) == 0) then "each rule needs at least one use profile"
+  elif any((.rules // [])[]; has("approval") and .approval != "captain") then "approval must be \"captain\" when present"
+  elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider"
+  elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, provider, and floor must be well formed when present"
+  elif any((.rules // [])[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
+  elif any((.rules // [])[] | profiles(.use)[]; (effort_ok(.harness; .model; .effort) | not)) then "each use profile effort must be supported by its harness and model"
+  elif any((.rules // [])[] | profiles(.use)[]; multi_provider(.harness) and (has("provider") | not)) then "multi-provider use profiles require provider"
   elif has("default") and (profiles(.default) | length) == 0 then "default must be a profile object or non-empty profile array"
   elif has("default") and any(profiles(.default)[]; profile_bad(.)) then "each default profile needs harness; model, effort, provider, and floor must be well formed when present"
   elif has("default") and any(profiles(.default)[]; (verified(.harness) | not)) then "each default profile must name a verified harness"
@@ -175,25 +176,10 @@ while IFS=$'\t' read -r h m; do
   PMAP=$(jq -c --arg k "$h|$m" --arg p "$p" '. + {($k): (if $p == "" then null else $p end)}' <<<"$PMAP")
 done < <(jq -r '
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
-  ([.rules[] | profiles(.use)[]] + profiles(.default // null))
+  ([((.rules // [])[]) | profiles(.use)[]] + profiles(.default // null))
   | map("\(.harness)\t\(.model // "")") | unique | .[]' "$RULES")
 
-# ---- request: the rule Choice only ---------------------------------------------
-REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
-  --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
-  ($rules[0]) as $cfg |
-  ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
-  {
-    model: $model,
-    state: {task: {project: $project, brief: $brief}},
-    questions: {
-      rule: {
-        type: "choice",
-        instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
-        criteria: ($criteria + {default: $none_criterion})
-      }
-    }
-  }')
+RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 
 emit_error() {
   local reason=$1
@@ -206,22 +192,44 @@ emit_error() {
   exit 0
 }
 
-# ---- call typesafe.ai; the Authorization header travels on an fd, never argv --
 RESP_FILE=$(mktemp) || die "mktemp failed"
 trap 'rm -f "$RESP_FILE"' EXIT
-T0=$(fm_timing_now_ms)
-HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-  -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
-  -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY") \
-  --data-binary @- 2>/dev/null) || HTTP=000
-T1=$(fm_timing_now_ms)
-LAT_MS=$(( T1 - T0 ))
-[ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
-jq -e '(.answers.rule.choice | type) == "string" and
-  (.answers.rule.confidence | type) == "number" and
-  .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
-  (.answers.rule.probabilities | type) == "object"' \
-  "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
+DIRECT=false
+LAT_MS=null
+if [ "$RULE_COUNT" -eq 0 ]; then
+  DIRECT=true
+  jq -n '{model: null, answers: {rule: {choice: "default", confidence: null, probabilities: {default: 1}}}, usage: null}' > "$RESP_FILE"
+else
+  command -v curl >/dev/null 2>&1 || die "curl required"
+  REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
+    --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
+    ($rules[0]) as $cfg |
+    ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
+    {
+      model: $model,
+      state: {task: {project: $project, brief: $brief}},
+      questions: {
+        rule: {
+          type: "choice",
+          instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
+          criteria: ($criteria + {default: $none_criterion})
+        }
+      }
+    }')
+  T0=$(fm_timing_now_ms)
+  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+    -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
+    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY") \
+    --data-binary @- 2>/dev/null) || HTTP=000
+  T1=$(fm_timing_now_ms)
+  LAT_MS=$(( T1 - T0 ))
+  [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+  jq -e '(.answers.rule.choice | type) == "string" and
+    (.answers.rule.confidence | type) == "number" and
+    .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
+    (.answers.rule.probabilities | type) == "object"' \
+    "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
+fi
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
 if [ -z "$QUOTA" ]; then
@@ -233,7 +241,7 @@ fi
 fm_quota_json_valid < "$QUOTA" || emit_error "quota snapshot is not valid quota-axi --json: $QUOTA"
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
-RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --arg lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
+RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson direct "$DIRECT" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" '
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -297,7 +305,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --arg lat "$LAT_MS" --arg none_cr
    then ($choice | ltrimstr("rule_") | tonumber)
    else null end) as $rule_number |
   (if $choice == "default" then null
-   elif $rule_number != null and $rule_number <= ($cfg.rules | length) then $cfg.rules[$rule_number - 1]
+   elif $rule_number != null and $rule_number <= (($cfg.rules // []) | length) then $cfg.rules[$rule_number - 1]
    else null end) as $rule |
   (if $choice != "default" and $rule == null then {invalid: "rule \($choice) is not in the rules file"}
    elif $rule == null then {source: "default", use: profiles($cfg.default // null), note: "no rule matched"}
@@ -306,13 +314,13 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --arg lat "$LAT_MS" --arg none_cr
      then {source: "default", use: profiles($cfg.default // null), note: "rule \($choice) floor \($rule.floor.scope) below \($rule.floor.min_percent)%: fall through to default"}
    else {source: $choice, use: profiles($rule.use), note: "rule matched"} end) as $sel |
   {
-    model: $r.model, latency_ms: ($lat | tonumber), tokens: ($r.usage // null),
+    model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
     rule: $choice,
     rule_when: (if $rule == null then $none_criterion else $rule.when end | .[0:60]),
     confidence: $a.confidence, probabilities: $a.probabilities
   } as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
-  elif $a.confidence < ($floor | tonumber) then $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)"}
+  elif ($direct | not) and $a.confidence < ($floor | tonumber) then $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)"}
   elif $sel.escalate then $ev + {status: "escalate", reason: $sel.escalate, candidates: []}
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else
@@ -334,7 +342,7 @@ fi
 jq -r '
   "dispatch-resolve:",
   "  status: \(.status)",
-  "  model: \(.model // "-")   latency_ms: \(.latency_ms)   tokens: \(.tokens.input_tokens // "-")/\(.tokens.output_tokens // "-")",
+  "  model: \(.model // "-")   latency_ms: \(.latency_ms // "-")   tokens: \(.tokens.input_tokens // "-")/\(.tokens.output_tokens // "-")",
   "  rule: \(.rule) (\(.rule_when))   confidence: \(.confidence)",
   "  probabilities: \([.probabilities | to_entries[] | "\(.key)=\(.value)"] | join(" "))",
   (if .reason then "  reason: \(.reason)" else empty end),
