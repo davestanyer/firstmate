@@ -110,6 +110,13 @@ Residue accumulates as ever-deeper `<lock>.steal.steal...` directories, which ev
 
 The repository ships this variable in its `.claude/settings.json` environment block, so a Claude session started in a checkout that has it is already correct.
 A home that predates that block must add it.
+
+That block covers Firstmate's OWN processes and nothing else.
+A worker's pane is opened by the backend daemon, which never inherited that environment, so the pane's shell and everything under it start without `MSYS` even while Firstmate itself is correct.
+A worker in that state wedges the first time it takes a lock, and the home around it looks healthy, which is the hardest version of this failure to read.
+`bin/fm-spawn.sh` therefore forwards `MSYS` into every pane alongside `PATH`, using this home's own value and falling back to `winsymlinks:sys` when the variable is absent.
+Nothing is required of you here, but a worker that cannot take a lock is the first thing to check if that forwarding is ever removed.
+
 Confirm the setting is live before trusting supervision:
 
 ```sh
@@ -189,10 +196,15 @@ Firstmate filters those multi-line reads, so the same bytes come back on Windows
 These are current, measured Windows limits rather than defects awaiting a fix.
 Each degrades to a documented fallback rather than failing silently.
 
+They were measured on the pinned toolchain this page installs - Herdr 0.8.2 and the Treehouse pin - and only those versions are verified.
+A newer build can move a limit in either direction, so re-measure rather than assume before trusting an entry against one.
+Herdr 0.9.0-preview is a known example: it populates a pane's `cwd` field where 0.8.2 left it null, which changed how the entry below about live working directories behaves.
+
 - Windows cannot host remote second mates, because it cannot serve as a `--remote` target.
 - Herdr's `terminal attach` is unsupported, so use `bin/fm-peek.sh` and `bin/fm-send.sh` rather than attaching.
 - Windows Python has no `AF_UNIX`, so native event subscription and presentation-space ordering fall back to polling and flat placement.
 - A `noacl` NTFS mount cannot create a directory at mode 700, so the presentation lock namespace accepts the mode it can get after probing for the capability, while its directory, symbolic-link, and owner checks stay unconditional on every platform.
+  `mkdir -m 700` additionally exits non-zero here even though it created the directory, so test for the directory rather than trusting that exit status.
 - MSYS `ps` supports no `-o` selectors, so process reads are served from `bin/fm-winproc-lib.sh` in native Windows process-id space, and signalling uses `/usr/bin/kill -W` by absolute path because the shell builtin has no `-W` flag.
 - `/usr/bin/kill -W` cannot address a process outside the MSYS runtime at all. That is a safety property rather than a gap, because the signalling path can never reach a process the adapter did not itself resolve.
 - Herdr reports no live working directory for a pane on Windows, so Firstmate acquires each task worktree directly with a Treehouse lease instead of reading it back off the terminal. That path is used on every platform, not only this one.
