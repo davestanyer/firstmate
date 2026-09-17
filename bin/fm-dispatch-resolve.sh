@@ -39,9 +39,9 @@
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
-#   Exit 2 only for a usage or configuration error (unreadable brief or rules,
-#   malformed rules file, or missing jq), which is actionable, never selected
-#   around.
+#   Exit 2 only for a usage or configuration error (unreadable brief, an
+#   existing unreadable rules file, malformed rules, or missing jq), which is
+#   actionable, never selected around.
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
@@ -76,6 +76,10 @@ TS_TIMEOUT=5
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
+no_rules() {
+  printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
+  exit 0
+}
 usage() {
   awk '
     NR == 1 { next }
@@ -106,6 +110,7 @@ fi
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
 [ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
+[ -e "$RULES_PATH" ] || no_rules
 [ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
 command -v jq >/dev/null 2>&1 || die "jq required"
 RULES=$(mktemp) || die "mktemp failed"
@@ -208,8 +213,7 @@ emit_error() {
 }
 
 if [ "$RULE_COUNT" -eq 0 ]; then
-  printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
-  exit 0
+  no_rules
 fi
 
 RESP_FILE=$(mktemp) || die "mktemp failed"

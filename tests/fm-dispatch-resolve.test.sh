@@ -273,6 +273,16 @@ cp "$BASE_RULES" "$RULES"
 pass "rules snapshots and shell quoting preserve the profile protocol"
 
 # --- no rules return control to the existing intake ----------------------------
+rm -f "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "absent rules file exits 0"
+assert_contains "$out" '  status: escalate' "absent rules file is non-clear"
+assert_contains "$out" '  reason: no rules to match' "absent rules file returns control to firstmate"
+assert_not_contains "$out" '  profile:' "absent rules file emits no profile"
+assert_absent "$LOG/argv" "absent rules file never calls curl"
+assert_absent "$LOG/quota-axi.calls" "absent rules file never reads quota"
+
 DEFAULT_ONLY="$TMP_ROOT/default-only.json"
 EMPTY_RULES="$TMP_ROOT/empty-rules.json"
 printf '%s\n' '{"default":[{"harness":"claude","model":"opus"},{"harness":"cursor","model":"cursor-grok-4.6-high"}]}' > "$DEFAULT_ONLY"
@@ -564,9 +574,6 @@ reset_log
 TYPESAFE_API_KEY=$KEY run code out err
 expect_code 2 "$code" "missing brief exits 2"
 assert_contains "$err" 'brief file required' "missing brief is named"
-rm -f "$RULES"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-expect_code 2 "$code" "missing canonical rules file exits 2"
 printf '%s\n' '{"rules":[' > "$RULES"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 2 "$code" "non-JSON rules exits 2"
