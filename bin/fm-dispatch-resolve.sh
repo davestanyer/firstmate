@@ -32,7 +32,7 @@
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
 #     reason: <why the status is not clear>
-#     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | not eligible: <reason>
+#     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
@@ -80,7 +80,7 @@ usage() {
   ' "$0"
 }
 
-BRIEF='' PROJECT='' RULES="$CONFIG/crew-dispatch.json"
+BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
@@ -102,8 +102,12 @@ fi
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
 [ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
-[ -r "$RULES" ] || die "rules file not readable: $RULES"
+[ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
 command -v jq >/dev/null 2>&1 || die "jq required"
+RULES=$(mktemp) || die "mktemp failed"
+trap 'rm -f "$RULES"' EXIT
+cp "$RULES_PATH" "$RULES" || die "could not snapshot rules file: $RULES_PATH"
+chmod 400 "$RULES" || die "could not protect rules snapshot"
 VERIFIED_HARNESSES=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
 
 # The fields this tool consumes must be well formed; bootstrap owns the wider
@@ -161,8 +165,8 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   elif has("default") and any(profiles(.default)[]; (verified(.harness) | not)) then "each default profile must name a verified harness"
   elif has("default") and any(profiles(.default)[]; (effort_ok(.harness; .model; .effort) | not)) then "each default profile effort must be supported by its harness and model"
   else empty end
-' "$RULES" 2>/dev/null) || die "malformed rules file: $RULES (not JSON)"
-[ -z "$rules_err" ] || die "malformed rules file: $RULES - $rules_err"
+' "$RULES" 2>/dev/null) || die "malformed rules file: $RULES_PATH (not JSON)"
+[ -z "$rules_err" ] || die "malformed rules file: $RULES_PATH - $rules_err"
 
 missing_provider=$(jq -r '
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -176,19 +180,19 @@ missing_provider=$(jq -r '
 done)
 if [ -n "$missing_provider" ]; then
   IFS=$'\t' read -r location harness <<< "$missing_provider"
-  die "malformed rules file: $RULES - $location profiles whose harness lacks one authoritative provider family require provider: $harness"
+  die "malformed rules file: $RULES_PATH - $location profiles whose harness lacks one authoritative provider family require provider: $harness"
 fi
 
 # ---- harness -> provider map, from the single owner in fm-quota-axi-lib.sh -----
 PMAP='{}'
-while IFS=$'\t' read -r h m; do
+while IFS= read -r h; do
   [ -n "$h" ] || continue
   p=$(fm_quota_single_provider_for_harness "$h" 2>/dev/null) || p=''
-  PMAP=$(jq -c --arg k "$h|$m" --arg p "$p" '. + {($k): (if $p == "" then null else $p end)}' <<<"$PMAP")
+  PMAP=$(jq -c --arg h "$h" --arg p "$p" '. + {($h): (if $p == "" then null else $p end)}' <<<"$PMAP")
 done < <(jq -r '
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   ([((.rules // [])[]) | profiles(.use)[]] + profiles(.default // null))
-  | map("\(.harness)\t\(.model // "")") | unique | .[]' "$RULES")
+  | map(.harness) | unique | .[]' "$RULES")
 
 RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 
@@ -201,7 +205,7 @@ emit_error() {
 
 RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
-trap 'rm -f "$RESP_FILE" "$QUOTA"' EXIT
+trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
 DIRECT=false
 LAT_MS=null
 if [ "$RULE_COUNT" -eq 0 ]; then
@@ -261,7 +265,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
   def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
   def rows($p): (prov($p) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
-  def provider_of($c): ($c.provider // $pmap["\($c.harness)|\($c.model // "")"] // null);
+  def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
   def measured($p):
     (prov($p) != null and (["known", "partial"] | index(prov($p).quotaSemantics.status)) != null);
   def applicable($p; $m):
@@ -284,8 +288,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
   def evaluate($c):
     (provider_of($c)) as $p |
     if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
-    elif prov($p) == null then {profile: $c, provider: $p, eligible: false, reason: "provider \($p) not in the quota snapshot"}
-    elif (measured($p) | not) then {profile: $c, provider: $p, eligible: false, unknown: true, reason: "provider \($p) unmeasured (\(prov($p).quotaSemantics.status)): disclosed uncertainty, not rankable"}
+    elif prov($p) == null then {profile: $c, provider: $p, eligible: false, unranked: true, reason: "provider \($p) not in the quota snapshot"}
+    elif (measured($p) | not) then {profile: $c, provider: $p, eligible: false, unranked: true, reason: "provider \($p) unmeasured (\(prov($p).quotaSemantics.status))"}
     else
       (applicable($p; ($c.model // ""))) as $rows |
       (evidence($rows)) as $bounds |
@@ -352,30 +356,38 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
   else
     ($sel.use | map(evaluate(.))) as $cands |
     ([$cands[] | select(.eligible)]) as $elig |
+    ([$cands[] | select(.unranked)]) as $unranked |
     if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
     else
       ($elig | max_by(.spendPriority)) as $best |
       ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
       if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
-      else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best} end
+      else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
+        + (if ($unranked | length) > 0 then
+             {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[].provider + " unmeasured"] | unique | join(", ")))"}
+           else {} end)
+      end
     end
   end') || emit_error "resolution failed"
 
 TEXT=$(jq -r '
+  def flat: tostring | gsub("[\t\r\n]"; " ");
+  def show($value): ($value // "-") | flat;
   "dispatch-resolve:",
-  "  status: \(.status)",
-  "  model: \(.model // "-")   latency_ms: \(.latency_ms // "-")   tokens: \(.tokens.input_tokens // "-")/\(.tokens.output_tokens // "-")",
-  "  rule: \(.rule) (\(.rule_when))   confidence: \(.confidence)",
-  "  probabilities: \([.probabilities | to_entries[] | "\(.key)=\(.value)"] | join(" "))",
-  (if .reason then "  reason: \(.reason)" else empty end),
-  (if .note then "  note: \(.note)" else empty end),
-  (.candidates[]? | "  candidate: \(.profile.harness):\(.profile.model // "-")"
-      + (if .provider then "  provider=\(.provider)" else "" end)
-      + (if .scope then "  scope=\(.scope)  remaining=\(.pct // "-")%  spendPriority=\(.spendPriority // "-")  runway=\(.runway // "-")" else "" end)
-      + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope):\(.pct // "-")%/\(.runway // .status)"] | join(",")) else "" end)
-      + "  -> " + (if .eligible then "eligible" else "not eligible: \(.reason)" end)),
-  (if .chosen then "  profile: --harness \(.chosen.profile.harness)"
-      + (if .chosen.profile.model then " --model \(.chosen.profile.model)" else "" end)
-      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+  "  status: \(.status | flat)",
+  "  model: \(show(.model))   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
+  "  rule: \(.rule | flat) (\(.rule_when | flat))   confidence: \(.confidence | flat)",
+  "  probabilities: \([.probabilities | to_entries[] | "\(.key | flat)=\(.value | flat)"] | join(" "))",
+  (if .reason then "  reason: \(.reason | flat)" else empty end),
+  (if .note then "  note: \(.note | flat)" else empty end),
+  (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
+  (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
+      + (if .provider then "  provider=\(.provider | flat)" else "" end)
+      + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
+      + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
+      + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
+  (if .chosen then "  profile: --harness \(.chosen.profile.harness | flat)"
+      + (if .chosen.profile.model then " --model \(.chosen.profile.model | flat)" else "" end)
+      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | flat)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"
 exit 0

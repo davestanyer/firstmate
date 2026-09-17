@@ -14,7 +14,6 @@ Verified 2026-09-16 against `https://api.typesafe.ai`.
 Observed error shapes: 401 `authentication_error` for a bad key, 403 when the header is missing, 422 with a `detail[].loc` naming the offending field, 400 `api_usage_error` for an unknown model, 405 on GET.
 No rate-limit headers were present on any response; every response carried `x-typesafe-request-id`.
 Observed end-to-end latency from a Mac was 123 to 348 ms per request, with the server's own upstream time at 4 to 60 ms.
-The cookbooks price `jev-1.12` at $0.042 per million input tokens; there is no published price list, so the per-brief cost below is inferred from that constant.
 
 ## Live rule match against real briefs
 
@@ -38,26 +37,11 @@ Of the five disagreements, one was a wrong hand label (the brief quoted the bug-
 A lean request that asks only the rule Choice matched the full request (rule, profile, and status) on all 25 briefs, which is why the shipped tool asks one question and keeps every gate in code.
 That recorded agreement predates the shipped neutral `No listed rule applies to this task.` option. Agreement with the neutral sentence is re-measured as a separate live check outside the pipeline and disclosed in the PR body rather than represented by the historical table.
 
-## What the tool replaces
-
-Measured from this home's own Claude Code transcripts, 83 crewmate and scout dispatches over 34 days ending 2026-09-16, with prices read from platform.claude.com that day.
-The routing window is the turns between the brief being written and the spawn that touched quota-axi, the dispatch rules, or the quota helper.
-
-| Measure | Today | With the tool |
-| --- | --- | --- |
-| Routing API calls per dispatch, median | 3 | 1 |
-| Routing output tokens per dispatch, median | 5,867 | about 150 |
-| Cost per dispatch, median | $0.90 | $0.235 |
-| Wall time per dispatch, median | 28.6 s | 2.75 s |
-
-The saving comes from removing whole turns over a large cached context, not from the text the model replaces, which is why `AGENTS.md` asks for the tool inside the turn that already exists after the brief is written.
-Dispatches the tool calls ambiguous or escalates fall back to today's path and save nothing.
-
 ## Offline behavior
 
 `tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, and the header read from file descriptor 3, and with a fake `quota-axi`.
-It proves: firstmate can invoke the resolve path without a preflight; rules are consumed from the isolated home's canonical `config/crew-dispatch.json`; the absent key (environment and `.env`) prints one stderr line, nothing on stdout, exits 0, and never invokes `curl` or `quota-axi`; default-only and empty-rules files resolve the default quota argmax with null request evidence and no `curl` call, and the documented starter configuration resolves its Pi default through the declared Claude provider; a `.env` key turns the tool on and the environment wins over it; the key never appears on `curl` argv and arrives only as the bearer header on the descriptor; the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never `why`, `use`, or quota; and the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial and unmeasured providers, account-wide quota veto, limiting-bound ranking, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities, or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule id paths behave as the contract states, with configuration errors exiting 2 before any network call.
-`tests/fm-bootstrap.test.sh` proves bootstrap accepts the declared fields and reports each malformed shape.
+It proves: firstmate can invoke the resolve path without a preflight; rules are snapshotted once from the isolated home's canonical `config/crew-dispatch.json` and dynamic output fields are flattened to one line; the absent key (environment and `.env`) prints one stderr line, nothing on stdout, exits 0, and never invokes `curl` or `quota-axi`; default-only and empty-rules files resolve the default quota argmax with null request evidence and no `curl` call, and the documented starter configuration resolves its Pi default through the declared Claude provider; a `.env` key turns the tool on and the environment wins over it; the key never appears on `curl` argv and arrives only as the bearer header on the descriptor; the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never `why`, `use`, or quota; and the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, account-wide quota veto, limiting-bound ranking, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities, or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule id paths behave as the contract states, with configuration errors exiting 2 before any network call.
+`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key and validates each malformed shape when the environment or home `.env` activates typed resolution.
 
 ```console
 $ bash tests/fm-dispatch-resolve.test.sh | tail -1

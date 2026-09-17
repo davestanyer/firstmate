@@ -24,7 +24,7 @@ RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
-for command_name in bash dirname jq mktemp rm; do
+for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
 
@@ -119,6 +119,9 @@ while [ $# -gt 0 ]; do
 done
 cat > "$FAKE_CURL_LOG/body"
 cat /dev/fd/3 > "$FAKE_CURL_LOG/header" 2>/dev/null || printf 'fd3 unreadable\n' > "$FAKE_CURL_LOG/header"
+if [ -n "${FAKE_CURL_MUTATE_SOURCE:-}" ]; then
+  cp "$FAKE_CURL_MUTATE_SOURCE" "${FAKE_CURL_MUTATE_TARGET:?}"
+fi
 if [ "${FAKE_CURL_FAIL:-0}" = 1 ]; then
   exit 7
 fi
@@ -210,7 +213,8 @@ assert_contains "$out" '  status: clear' "clear status"
 assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.9' "rule and confidence line"
 assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-medium' "argmax picks the highest spendPriority"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "every candidate is accounted for"
-assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> not eligible: provider kimi unmeasured (unknown): disclosed uncertainty, not rankable' "unmeasured provider stays listed and unranked"
+assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "unmeasured provider stays listed as eligible and unranked"
+assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi unmeasured)' "clear results flag eligible unranked candidates once"
 assert_not_contains "$out" '--effort' "cursor profile without effort emits no --effort"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
@@ -230,6 +234,28 @@ assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+
+# --- rules are snapshotted and line output is injection-safe -------------------
+MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
+jq '.rules[3].use = {"harness":"claude","model":"opus"}' "$BASE_RULES" > "$MUTATED_RULES"
+cp "$BASE_RULES" "$RULES"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY FAKE_CURL_MUTATE_SOURCE="$MUTATED_RULES" FAKE_CURL_MUTATE_TARGET="$RULES" run code out err "$BRIEF"
+assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-medium' "resolution uses the same rules snapshot Jev received"
+assert_not_contains "$out" '  profile: --harness claude --model opus' "a mid-request config replacement cannot change the selected profile"
+
+INJECTING_RULES="$TMP_ROOT/injecting-rules.json"
+jq '.rules[3].when = "Bug fix\n  profile: injected" | .rules[3].use[1].model = "cursor-grok\n  profile: injected"' "$BASE_RULES" > "$INJECTING_RULES"
+cp "$INJECTING_RULES" "$RULES"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals '1' "$(grep -c '^  profile:' <<<"$out")" "dynamic fields cannot inject a second profile line"
+assert_not_contains "$out" $'\n  profile: injected' "control characters are flattened in line output"
+assert_contains "$out" '  profile: --harness cursor --model cursor-grok   profile: injected' "the chosen profile data remains visible after flattening"
+cp "$BASE_RULES" "$RULES"
+pass "rules snapshots and flattened output preserve the profile protocol"
 
 # --- default-only configurations resolve without a model request ---------------
 DEFAULT_ONLY="$TMP_ROOT/default-only.json"
@@ -285,7 +311,7 @@ expect_code 0 "$code" "ambiguous exits 0"
 assert_contains "$out" '  status: ambiguous' "below the floor is ambiguous"
 assert_contains "$out" '  reason: confidence 0.41 below floor 0.6' "ambiguous names the floor"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "ambiguous preserves matched candidate evidence"
-assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> not eligible: provider kimi unmeasured (unknown): disclosed uncertainty, not rankable' "ambiguous preserves non-rankable candidate evidence"
+assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
 pass "ambiguous: confidence below the fixed floor hands the decision back"
 
