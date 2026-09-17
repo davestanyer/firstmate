@@ -262,7 +262,14 @@ assert_contains "$out" '  status: clear' "rule floor fall-through still resolves
 assert_contains "$out" '  note: rule rule_1 floor model:fable below 20%: fall through to default' "rule floor fall-through is explained"
 assert_contains "$out" '  profile: --harness cursor --model cursor-grok-4.6-high' "fall-through resolves among the default profiles"
 assert_not_contains "$out" 'candidate: claude:fable' "the floored rule's own profile is not a candidate"
-pass "rule floor: a failed quota floor falls through to the default profiles"
+
+MISSING_RULE_FLOOR="$TMP_ROOT/missing-rule-floor.json"
+jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability) |= map(select(.scope != "model:fable"))' "$QUOTA" > "$MISSING_RULE_FLOOR"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$MISSING_RULE_FLOOR"
+assert_contains "$out" '  status: escalate' "an unverifiable rule floor escalates"
+assert_contains "$out" '  reason: rule rule_1 floor claude/model:fable is unverifiable' "the unverifiable rule floor names its provider and scope"
+assert_not_contains "$out" '  profile:' "an unverifiable rule floor never authorizes default routing"
+pass "rule floor: known shortfall falls through while unavailable evidence escalates"
 
 # --- declared provider and profile floor --------------------------------------
 reset_log
@@ -373,6 +380,20 @@ mv "$TMP_ROOT/malformed-usage.json" "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
 assert_contains "$out" '  status: error' "malformed usage is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "malformed usage cannot break text rendering silently"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+jq 'del(.answers.rule.probabilities.default)' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
+mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+assert_contains "$out" '  status: error' "missing probability choice is an error outcome"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must name every offered choice"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+jq '.answers.rule.probabilities.rule_4 = "high"' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
+mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"
+assert_contains "$out" '  status: error' "nonnumeric probability is an error outcome"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must be numeric and bounded"
 reset_log
 write_response "$RESPONSE" rule_4 2
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --rules "$RULES" --quota "$QUOTA"

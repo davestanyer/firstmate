@@ -229,10 +229,14 @@ else
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
-  jq -e '(.answers.rule.choice | type) == "string" and
+  jq -e --slurpfile rules "$RULES" '
+    (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
+    (.answers.rule.choice | type) == "string" and
     (.answers.rule.confidence | type) == "number" and
     .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
     (.answers.rule.probabilities | type) == "object" and
+    ((.answers.rule.probabilities | keys | sort) == $choices) and
+    all(.answers.rule.probabilities[]; type == "number" and . >= 0 and . <= 1) and
     ((has("usage") | not) or
       ((.usage | type) == "object" and
        (.usage.input_tokens | type) == "number" and
@@ -269,11 +273,16 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
       .scope == "all_models" or .scope == "all_products" or
       ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare)))
     )];
-  def floor_ok($f; $p):
-    if $f == null then true
+  def floor_state($f; $p):
+    if $f == null then "none"
+    elif prov($p) == null or (measured($p) | not) then "unknown"
     else [rows($p)[] | select(.scope == $f.scope)] as $matches
-      | (($matches | length) > 0 and all($matches[]; .status == "known" and .effectivePercentRemaining >= $f.min_percent))
+      | if ($matches | length) == 0 or any($matches[]; .status != "known") then "unknown"
+        elif any($matches[]; .effectivePercentRemaining < $f.min_percent) then "below"
+        else "ok"
+        end
     end;
+  def floor_ok($f; $p): (floor_state($f; $p) == "none" or floor_state($f; $p) == "ok");
   def evidence($rows):
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
@@ -316,10 +325,12 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --argjson
   (if $choice == "default" then null
    elif $rule_number != null and $rule_number <= (($cfg.rules // []) | length) then $cfg.rules[$rule_number - 1]
    else null end) as $rule |
+  (if $rule == null then "none" else floor_state($rule.floor; $rule.floor.provider) end) as $rule_floor_state |
   (if $choice != "default" and $rule == null then {invalid: "rule \($choice) is not in the rules file"}
    elif $rule == null then {source: "default", use: profiles($cfg.default // null), note: "no rule matched"}
    elif ($rule.approval // "") == "captain" then {source: $choice, escalate: "rule requires the captain'"'"'s explicit approval before dispatch"}
-   elif ($rule.floor != null and (floor_ok($rule.floor; $rule.floor.provider) | not))
+   elif $rule_floor_state == "unknown" then {source: $choice, escalate: "rule \($choice) floor \($rule.floor.provider)/\($rule.floor.scope) is unverifiable"}
+   elif $rule_floor_state == "below"
      then {source: "default", use: profiles($cfg.default // null), note: "rule \($choice) floor \($rule.floor.scope) below \($rule.floor.min_percent)%: fall through to default"}
    else {source: $choice, use: profiles($rule.use), note: "rule matched"} end) as $sel |
   {
