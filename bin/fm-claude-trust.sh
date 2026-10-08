@@ -184,6 +184,12 @@ unset CDPATH \
   GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_GLOBAL \
   GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
 
+# Whether a path is absolute in a form this host resolves is a platform
+# question, not a trust question, and bin/fm-platform-lib.sh owns it. Sourced
+# after the unset above so the `cd` it uses cannot be redirected by CDPATH.
+# shellcheck source=bin/fm-platform-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-platform-lib.sh"
+
 usage() {
   echo "usage: fm-claude-trust.sh <worktree> <project>" >&2
   echo "       fm-claude-trust.sh --secondmate-home <home> <id>" >&2
@@ -257,10 +263,15 @@ CONFIG_DIR=${CLAUDE_CONFIG_DIR:-${HOME:-}}
 # worker's own cwd once fm-spawn.sh forwards it verbatim onto the launch, so the
 # two sides can name different stores and the registration would report a
 # success the worker never sees. Refuse rather than guess at the worker's cwd.
-case ${CLAUDE_CONFIG_DIR:-} in
-  '' | /*) ;;
-  *) refuse "CLAUDE_CONFIG_DIR '$CLAUDE_CONFIG_DIR' is a relative path, so the store the worker reads cannot be guaranteed to be the one written here; set it to an absolute path" ;;
-esac
+#
+# Unset is not relative: it means the store falls back to HOME on both sides,
+# which names one store, so it passes. Absoluteness itself is asked of
+# fm_path_is_absolute rather than tested here, because a native Windows
+# absolute path is absolute too and a bare `/*` test refused every one of them,
+# blocking claude spawns outright on Git Bash.
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && ! fm_path_is_absolute "$CLAUDE_CONFIG_DIR"; then
+  refuse "CLAUDE_CONFIG_DIR '$CLAUDE_CONFIG_DIR' is a relative path, so the store the worker reads cannot be guaranteed to be the one written here; set it to an absolute path"
+fi
 # fm-spawn forwards a set CLAUDE_CONFIG_DIR onto the launch without requiring it
 # to exist, because claude creates its own store directory. Create it here for
 # the same reason, and refuse only when it genuinely cannot be written, since a

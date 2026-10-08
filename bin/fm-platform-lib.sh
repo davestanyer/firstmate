@@ -92,6 +92,32 @@ fm_path_posix() {  # <path>
   printf '%s\n' "$path"
 }
 
+# Whether <path> is absolute in a form this host actually resolves.
+#
+# A caller that must refuse a RELATIVE path needs this question rather than a
+# bare `/*` test. On MSYS a native Windows absolute path - drive-rooted
+# (C:\Users\x, C:/Users/x) or UNC (\\server\share) - is every bit as absolute as
+# a POSIX one, and it is the form a Windows user naturally sets, so a `/*` test
+# misclassifies it as relative on the one platform where it is normal.
+#
+# The Windows forms count only under MSYS, because off it `C:\x` really is a
+# relative path naming a directory whose name contains a colon and backslashes.
+# Empty is not absolute; a caller that accepts "unset" tests that separately,
+# because unset and relative are different answers with different consequences.
+fm_path_is_absolute() {  # <path>
+  local path=$1
+  [ -n "$path" ] || return 1
+  case $path in
+    /*) return 0 ;;
+  esac
+  fm_platform_is_msys || return 1
+  case $path in
+    [A-Za-z]:[\\/]*) return 0 ;;
+    [\\][\\]*) return 0 ;;
+  esac
+  return 1
+}
+
 # Print the octal mode bits of <path>, or nothing when it cannot be read.
 fm_platform_file_mode() {  # <path>
   if [ "$(fm_platform_uname)" = Darwin ]; then

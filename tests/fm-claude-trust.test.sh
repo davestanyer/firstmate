@@ -400,6 +400,44 @@ test_relative_config_dir_is_refused() {
   pass "fm-claude-trust.sh: refuses a relative CLAUDE_CONFIG_DIR"
 }
 
+# The inverse, and the regression this pair exists for: a NATIVE WINDOWS
+# absolute path is absolute, and refusing it as relative blocked every claude
+# spawn on Git Bash outright.
+#
+# The assertion is deliberately only that the relative refusal does not fire.
+# What happens afterwards legitimately differs by host - on a Linux runner the
+# seeded MSYS verdict makes the value nameable inside the case directory, while
+# on a real Git Bash host it names a drive that very likely does not exist - and
+# pinning either outcome would make this case fail on the other platform for a
+# reason that has nothing to do with absoluteness.
+#
+# Both halves run from the case directory so nothing is created outside it, and
+# the drive letter is one no fixture relies on.
+test_native_windows_config_dir_is_not_called_relative() {
+  local rec out
+  rec=$(make_case windows-abs-config)
+  read_case "$rec"
+  mkdir -p "$CASE_DIR/winhome"
+
+  out=$(cd "$CASE_DIR/winhome" \
+    && FM_PLATFORM_UNAME=MINGW64_NT-fixture CLAUDE_CONFIG_DIR='Z:/fm-test-store' \
+       HOME="$CASE_DIR/winhome" "$TRUST" "$WT" "$PROJ" 2>&1)
+  case "$out" in
+    *"is a relative path"*)
+      fail "on MSYS a native Windows absolute CLAUDE_CONFIG_DIR was refused as relative: $out" ;;
+  esac
+
+  # The divergence, asserted so the case cannot pass vacuously: the identical
+  # value off MSYS really is relative, and must still be refused there.
+  out=$(cd "$CASE_DIR/winhome" \
+    && FM_PLATFORM_UNAME=Linux CLAUDE_CONFIG_DIR='Z:/fm-test-store' \
+       HOME="$CASE_DIR/winhome" "$TRUST" "$WT" "$PROJ" 2>&1)
+  expect_code 1 $? "off MSYS a Windows-form CLAUDE_CONFIG_DIR must still be refused: $out"
+  assert_contains "$out" "relative" "the off-MSYS refusal did not say why the value is unusable"
+
+  pass "fm-claude-trust.sh: a native Windows absolute CLAUDE_CONFIG_DIR is not relative on MSYS"
+}
+
 test_config_directory_is_refused() {
   local rec out
   rec=$(make_case config-dir)
@@ -853,6 +891,7 @@ test_git_env_overrides_cannot_defeat_the_primary_checkout_refusal
 test_home_directory_is_refused_even_when_it_is_a_worktree
 test_config_directory_is_refused
 test_relative_config_dir_is_refused
+test_native_windows_config_dir_is_not_called_relative
 test_non_git_directory_is_refused
 test_missing_directory_is_refused
 test_foreign_project_worktree_is_refused

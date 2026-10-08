@@ -121,6 +121,72 @@ for func in fm_path_native fm_path_posix; do
 done
 pass "an empty path converts to nothing and succeeds"
 
+# --- absoluteness, which is platform-dependent ------------------------------
+#
+# The same string is absolute on one platform and relative on another, so each
+# case pins BOTH the verdict and the platform that produces it. Asserting the
+# Windows forms only under MSYS is what stops this collapsing into "anything
+# with a colon is absolute", which would be wrong on Linux.
+#
+# No cygpath is needed: the question is answered from the string's shape and
+# the reported uname, so these run with an empty PATH.
+
+# Run fm_path_is_absolute in a fresh process; print its exit status.
+run_abs() {  # <uname> <input>
+  FM_PLATFORM_UNAME="$1" bash -c '
+    PATH=$1
+    export PATH
+    . "$2"
+    if fm_path_is_absolute "$3"; then echo yes; else echo no; fi
+  ' _ "$EMPTY_BIN" "$LIB" "$2"
+}
+
+for input in /tmp/x /; do
+  [ "$(run_abs Linux "$input")" = yes ] \
+    || fail "off MSYS '$input' was not judged absolute"
+  [ "$(run_abs MINGW64_NT-fixture "$input")" = yes ] \
+    || fail "on MSYS '$input' was not judged absolute"
+done
+pass "a POSIX-absolute path is absolute on every platform"
+
+for input in relative/x ./x ../x x; do
+  [ "$(run_abs Linux "$input")" = no ] \
+    || fail "off MSYS '$input' was judged absolute"
+  [ "$(run_abs MINGW64_NT-fixture "$input")" = no ] \
+    || fail "on MSYS '$input' was judged absolute"
+done
+pass "a genuinely relative path is relative on every platform"
+
+# The regression this function exists for: every one of these was refused as
+# relative before, which blocked claude spawns outright on Git Bash.
+for input in 'C:\Users\x' 'C:/Users/x' 'c:\users\x' 'Z:/x' '\\server\share'; do
+  [ "$(run_abs MINGW64_NT-fixture "$input")" = yes ] \
+    || fail "on MSYS the native Windows path '$input' was judged relative"
+done
+pass "on MSYS a native Windows absolute path is absolute"
+
+# The divergence itself, asserted so the case cannot go quietly vacuous: the
+# identical string must answer differently on the two platforms.
+for input in 'C:\Users\x' 'C:/Users/x' '\\server\share'; do
+  [ "$(run_abs MINGW64_NT-fixture "$input")" = yes ] \
+    && [ "$(run_abs Linux "$input")" = no ] \
+    || fail "'$input' did not diverge between MSYS and Linux"
+done
+pass "the Windows forms count only under MSYS, and are relative off it"
+
+# A colon alone is not a drive letter, so these stay relative even on MSYS.
+for input in 'CC:/x' ':/x' 'C:x' 'C:'; do
+  [ "$(run_abs MINGW64_NT-fixture "$input")" = no ] \
+    || fail "on MSYS '$input' was mistaken for a drive-rooted path"
+done
+pass "a colon that is not a drive-letter root stays relative on MSYS"
+
+[ "$(run_abs MINGW64_NT-fixture "")" = no ] \
+  || fail "an empty path was judged absolute"
+[ "$(run_abs Linux "")" = no ] \
+  || fail "an empty path was judged absolute off MSYS"
+pass "an empty path is not absolute"
+
 # --- the mode-bit capability probe ------------------------------------------
 #
 # Run in a fresh process per case like everything else here: the probe memoizes
