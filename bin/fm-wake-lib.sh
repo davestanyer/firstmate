@@ -533,6 +533,23 @@ fm_lock_claim() {
   return 0
 }
 
+fm_lock_create_link() {
+  local ownerdir=$1 lockdir=$2 option msys_options=
+  case "$_FM_UNAME" in
+    MINGW*|MSYS*)
+      # Git Bash's default ln -s copies directories, which can never satisfy
+      # readlink-based ownership. MSYS system links need no Windows privilege.
+      # Scope this option to ln and preserve every unrelated caller option.
+      for option in ${MSYS:-}; do
+        case "$option" in winsymlinks:*) continue ;; esac
+        msys_options="${msys_options}${option} "
+      done
+      MSYS="${msys_options}winsymlinks:sys" ln -s "$ownerdir" "$lockdir"
+      ;;
+    *) ln -s "$ownerdir" "$lockdir" ;;
+  esac
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
@@ -545,7 +562,7 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  if fm_lock_create_link "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0

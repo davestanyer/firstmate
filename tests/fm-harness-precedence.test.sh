@@ -30,6 +30,9 @@ set -u
 # This suite states the markers it means to test in every case. Drop the ambient
 # ones so a verdict never depends on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+# The POSIX fixtures below deliberately control ps -o; the Windows cases at
+# the end enable and supply the separate native process sources explicitly.
+export FM_WINPROC_DISABLE=1
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
@@ -746,6 +749,40 @@ test_supervision_protocol_follows_corrected_verdict() {
   pass "session start renders the Codex protocol for a Codex primary holding a retained CLAUDECODE"
 }
 
+test_windows_native_ancestry() {
+  local dir table got
+  dir="$TMP_ROOT/windows"
+  mkdir -p "$dir"
+  table="$dir/table"
+  cat > "$table" <<'ROWS'
+100 200 C:\Program Files\Git\usr\bin\bash.exe
+200 300 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+300 400 C:\Program Files\Codex\codex.exe
+400 0 C:\Windows\explorer.exe
+ROWS
+  got=$(env FM_WINPROC_DISABLE=0 FM_WINPROC_FORCE=1 FM_WINPROC_SELF=100 \
+    FM_WINPROC_PS_CMD=false FM_WINPROC_TABLE_CMD="cat '$table'" "$HARNESS")
+  assert_equals "$got" codex "native parent tree identifies markerless Codex despite missing ps source"
+  got=$(env CLAUDECODE=1 FM_WINPROC_DISABLE=0 FM_WINPROC_FORCE=1 FM_WINPROC_SELF=100 \
+    FM_WINPROC_PS_CMD=false FM_WINPROC_TABLE_CMD="cat '$table'" "$HARNESS")
+  assert_equals "$got" codex "native Codex image outranks inherited Claude marker"
+  got=$(env FM_WINPROC_DISABLE=0 FM_WINPROC_FORCE=1 FM_WINPROC_SELF=100 \
+    FM_WINPROC_PS_CMD=false FM_WINPROC_TABLE_CMD=false "$HARNESS")
+  assert_equals "$got" unknown "unreadable native ancestry never invents a harness"
+  got=$(env CLAUDECODE=1 FM_WINPROC_DISABLE=0 FM_WINPROC_FORCE=1 FM_WINPROC_SELF=100 \
+    FM_WINPROC_PS_CMD=false FM_WINPROC_TABLE_CMD=false "$HARNESS")
+  assert_equals "$got" claude "verified marker remains usable when native ancestry is unavailable"
+  got=$(env FM_WINPROC_DISABLE=0 FM_WINPROC_FORCE=1 FM_WINPROC_SELF=100 \
+    FM_WINPROC_PS_CMD=false FM_WINPROC_TABLE_CMD="cat '$table'" "$HARNESS" ancestry 300)
+  assert_equals "$got" 'comm codex' "explicit ancestry pid addresses native Windows process"
+  pass "Windows native ancestry and marker precedence"
+}
+
+if [ "${1:-}" = windows ]; then
+  test_windows_native_ancestry
+  exit
+fi
+
 test_markerless_ancestry_outranks_foreign_marker
 test_genuine_marker_and_ancestry_agree
 test_cursor_ordering_still_decides_when_ancestry_is_silent
@@ -759,3 +796,4 @@ test_descent_probe_ignores_a_sibling_branch_the_walk_cannot_reach
 test_descent_probe_tolerates_an_args_only_foreign_verdict_at_the_deepest_vantage
 test_descent_probe_prefers_comm_strength_when_deepest_leaves_tie
 test_supervision_protocol_follows_corrected_verdict
+test_windows_native_ancestry

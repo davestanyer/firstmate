@@ -389,7 +389,7 @@ test_lock_late_claim_loses_after_recreate() {
   out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     owner1=$(fm_lock_owner_dir "$2") || exit 20
-    ln -s "$owner1" "$2" || exit 21
+    fm_lock_create_link "$owner1" "$2" || exit 21
     touch -h -t 200001010000 "$2" 2>/dev/null || sleep 2
     if ! fm_lock_try_acquire "$2"; then exit 22; fi
     before=$(cat "$2/pid" 2>/dev/null || true)
@@ -421,7 +421,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     owner=$(fm_lock_owner_dir "$2") || exit 20
-    ln -s "$owner" "$2" || exit 21
+    fm_lock_create_link "$owner" "$2" || exit 21
     fm_lock_try_acquire "$2.steal" || exit 22
     steal_owner=${FM_LOCK_OWNER_DIR:-}
     if fm_lock_claim "$2" "$owner"; then late=won; else late=lost; fi
@@ -1126,6 +1126,33 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_msys_lock_without_symlink_configuration() {
+  local dir mode
+  case "$(uname)" in
+    MSYS*|MINGW*) ;;
+    *)
+      pass "MSYS lock symlink regression skipped on non-Windows host"
+      return
+      ;;
+  esac
+  dir=$(make_case msys-lock)
+  for mode in unset 'winsymlinks:deepcopy' 'winsymlinks:nativestrict'; do
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1"
+      if [ "$3" = unset ]; then unset MSYS; else export MSYS="$3"; fi
+      fm_lock_try_acquire "$2" || exit 1
+      [ -L "$2" ] && fm_lock_points_to_owner "$2" "$FM_LOCK_OWNER_DIR" || exit 2
+      [ "${MSYS-unset}" = "$3" ] || exit 3
+      if (fm_lock_try_acquire "$2"); then exit 4; fi
+      fm_lock_release "$2"
+      [ ! -e "$2" ] && [ ! -L "$2" ] || exit 5
+    ' _ "$LIB" "$dir/state/lock" "$mode" \
+      || fail "MSYS lock acquire, ownership, contention or release failed with $mode"
+  done
+  pass "MSYS locks preserve ownership without ambient symlink configuration"
+}
+
+test_msys_lock_without_symlink_configuration
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse

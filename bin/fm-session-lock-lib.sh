@@ -73,10 +73,10 @@ _fm_harness_native_comm() {  # <windows-path>
 #   1. CLAUDE_PID, which Claude Code exports into every hook environment and
 #      which names the claude.exe Windows pid directly. Costs one `ps -W`
 #      (~240ms) to confirm the pid is live and is really a harness image.
-#   2. A walk up the real Windows parent chain. This is the structural source
+#   2. A walk up the MSYS and Windows parent chains. This is the structural source
 #      and the only one that works for a harness exporting no pid at all, but
-#      it costs one PowerShell CIM snapshot (~1.5s) and it breaks if an
-#      intermediate shell has already exited, since Windows does not reparent.
+#      it costs one PowerShell CIM snapshot (~1.5s). MSYS parent links bridge
+#      exec replacements whose original Windows process has already exited.
 #
 # Either source alone is sufficient for a positive verdict. Both are tried
 # because they fail for unrelated reasons.
@@ -97,8 +97,12 @@ _fm_harness_ancestry_pids_native_uncached() {
       ;;
   esac
 
-  # Source 2: the Windows parent chain.
+  # Source 2: the logical MSYS chain followed by the native Windows chain.
   pid=$(fm_winproc_self) || return 1
+  # Load in this shell: command substitutions below inherit these snapshots
+  # instead of discarding each loader's memo and querying CIM at every hop.
+  _fm_winproc_ps_load
+  _fm_winproc_load_table || return 1
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(fm_winproc_table_command "$pid" 2>/dev/null) || comm=
     comm=$(_fm_harness_native_comm "$comm" 2>/dev/null) || comm=
@@ -110,7 +114,7 @@ _fm_harness_ancestry_pids_native_uncached() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(fm_winproc_ppid "$pid" 2>/dev/null) || break
+    pid=$(fm_winproc_ancestry_ppid "$pid" 2>/dev/null) || break
     [ "$pid" -gt 1 ] 2>/dev/null || break
   done
   [ "$printed" -eq 1 ]

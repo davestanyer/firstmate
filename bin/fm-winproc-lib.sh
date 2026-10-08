@@ -160,6 +160,31 @@ fm_winproc_ppid() {  # <winpid>
   printf '%s\n' "$ppid"
 }
 
+# Print the live logical parent of a Windows pid for an ancestry walk.
+# MSYS exec preserves its logical PID but replaces the underlying Windows
+# process, so a child's native ParentProcessId can name an exited intermediary.
+# For MSYS rows, follow PPID to the parent's current WINPID in the same ps
+# snapshot; native rows have PPID 0 and continue through the CIM parent chain.
+# Keep fm_winproc_ppid as raw kernel evidence for callers such as the census.
+fm_winproc_ancestry_ppid() {  # <winpid>
+  local winpid=$1 ppid
+  fm_winproc_available || return 1
+  case "$winpid" in ''|*[!0-9]*) return 1 ;; esac
+  _fm_winproc_ps_load
+  ppid=$(printf '%s\n' "$_FM_WINPROC_PS_ROWS" | awk -v w="$winpid" '
+    $1 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {
+      windows[$1] = $4
+      if ($4 == w) parent = $2
+    }
+    END { if (parent > 1 && windows[parent] > 0) print windows[parent] }
+  ')
+  if [ -n "$ppid" ]; then
+    printf '%s\n' "$ppid"
+    return 0
+  fi
+  fm_winproc_ppid "$winpid"
+}
+
 # Drop both memoized snapshots so the next lookup re-reads the live system.
 #
 # Both loaders memoize for a process lifetime, which is right for a caller

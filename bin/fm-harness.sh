@@ -22,6 +22,7 @@
 #        fm-harness.sh ancestry [<pid>] print "<strength> <harness>" for the nearest
 #                                        harness process at or above <pid> (default this
 #                                        process), or nothing when the walk finds none.
+#                                        Explicit pids are native Windows pids on Git Bash.
 #                                        Ancestry evidence only, with no marker layer, so
 #                                        a real harness process can be asked what the walk
 #                                        makes of it (tests/fm-harness-liveness-drift-live-e2e.test.sh).
@@ -66,6 +67,13 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+if [ -f "$SCRIPT_DIR/fm-winproc-lib.sh" ]; then
+  # shellcheck source=bin/fm-winproc-lib.sh
+  . "$SCRIPT_DIR/fm-winproc-lib.sh"
+else
+  # Partial-bin consumers on Unix can retain their existing ps path.
+  fm_winproc_available() { return 1; }
+fi
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -150,6 +158,10 @@ harness_marker() {
 # precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
   local pid=$$ comm
+  if fm_winproc_available; then
+    [ "$(harness_ancestry)" = 'comm omp' ]
+    return
+  fi
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
@@ -167,10 +179,19 @@ ancestry_names_omp() {
 #          script path it was handed. This is the weakest inference in this file
 #          (any node process holding a harness-shaped path matches it), so it is
 #          used only when no marker is present.
-harness_process_verdict() {  # <pid>
+harness_process_verdict() {  # <pid> [<native-image>]
   local pid=$1 comm args argv0
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
-  argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
+  if [ "$#" -gt 1 ]; then
+    # Native executable paths use backslashes; normalize before basename and
+    # remove the executable suffix so the existing anchored names still match.
+    comm=${2//\\//}
+    comm=${comm%.exe}
+    comm=${comm%.EXE}
+    argv0=
+  else
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
+    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
+  fi
   if fm_cursor_process_matches "$comm" '' "$argv0"; then
     echo "comm cursor"
     return
@@ -229,6 +250,9 @@ harness_process_verdict() {  # <pid>
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
     node*|python*)
+      # A Windows image snapshot contains no argv. Do not reinterpret its
+      # native pid in the unrelated MSYS pid namespace to obtain arguments.
+      [ "$#" -eq 1 ] || return 0
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
       if fm_gemini_args_are_gemini "$args"; then
@@ -250,6 +274,10 @@ harness_process_verdict() {  # <pid>
 # inside another harness resolves to its own harness.
 harness_ancestry() {  # [<pid>]
   local pid=${1:-$$} verdict
+  if fm_winproc_available; then
+    harness_windows_ancestry "$pid"
+    return
+  fi
   for _ in 1 2 3 4 5 6 7 8; do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
@@ -267,6 +295,31 @@ harness_ancestry() {  # [<pid>]
   return 0
 }
 
+# Walk the native tree on Git Bash, whose ps lacks the POSIX -o interface.
+# Explicit pids are Windows pids; the default shell pid is translated once.
+# Load snapshots outside command substitutions so all hops share one capture.
+harness_windows_ancestry() {  # <pid>
+  local pid=$1 comm verdict parent
+  if [ "$pid" = "$$" ]; then
+    pid=$(fm_winproc_self) || return 0
+  fi
+  _fm_winproc_ps_load
+  _fm_winproc_load_table || true
+  for _ in 1 2 3 4 5 6 7 8; do
+    comm=$(fm_winproc_command "$pid" 2>/dev/null) \
+      || comm=$(fm_winproc_table_command "$pid" 2>/dev/null) || comm=
+    if [ -n "$comm" ]; then
+      verdict=$(harness_process_verdict "$pid" "$comm")
+      [ -z "$verdict" ] || { echo "$verdict"; return; }
+    fi
+    parent=$(fm_winproc_ancestry_ppid "$pid" 2>/dev/null) || break
+    case "$parent" in ''|*[!0-9]*) break ;; esac
+    [ "$parent" -ge 1 ] && [ "$parent" != "$pid" ] || break
+    pid=$parent
+  done
+  return 0
+}
+
 # Print the pids on the UPWARD path between the deepest descendant of <root> and
 # <root> itself, deepest first. Optional <eligible-leaf-pid> values restrict which
 # descendants may be chosen as that deepest one; with none given every descendant
@@ -280,7 +333,13 @@ process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   eligible=" ${*+$*} "
   any=0
   [ "$#" -eq 0 ] && any=1
-  pairs=$(ps -eo pid=,ppid= 2>/dev/null) || { printf '%s\n' "$root"; return 0; }
+  if fm_winproc_available; then
+    [ "$root" != "$$" ] || root=$(fm_winproc_self) || return 0
+    _fm_winproc_load_table || { printf '%s\n' "$root"; return 0; }
+    pairs=$(printf '%s\n' "$_FM_WINPROC_TABLE" | awk '{print $1, $2}')
+  else
+    pairs=$(ps -eo pid=,ppid= 2>/dev/null) || { printf '%s\n' "$root"; return 0; }
+  fi
   best=$root
   frontier=$root
   while [ -n "$frontier" ] && [ "$depth" -lt 8 ]; do
@@ -300,7 +359,11 @@ process_descent_path() {  # <root> [<eligible-leaf-pid>...]
           esac
         fi
         if [ "$hit" = 1 ]; then
-          verdict=$(harness_process_verdict "$child")
+          if fm_winproc_available; then
+            verdict=$(harness_process_verdict "$child" "$(fm_winproc_table_command "$child" 2>/dev/null)")
+          else
+            verdict=$(harness_process_verdict "$child")
+          fi
           if [ $((depth + 1)) -gt "$best_depth" ]; then
             best=$child
             best_depth=$((depth + 1))

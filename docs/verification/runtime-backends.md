@@ -6,6 +6,36 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Windows session ancestry across MSYS exec
+
+Verified on 2026-10-01 with Windows 11 x86_64, Git Bash 5.2.37(1)-release, and codex-cli 0.159.3.
+The native process bridge follows MSYS logical parent links before crossing into native Windows ancestry, so an MSYS exec replacement does not sever session ownership when its original Windows process exits.
+Run this token-free probe from the installed Codex session in the repository root using Git Bash:
+
+```sh
+export PATH=/usr/bin:/bin:$PATH
+. bin/fm-session-lock-lib.sh
+fm_harness_ancestry_pids
+/usr/bin/bash -c '
+  . bin/fm-session-lock-lib.sh
+  printf "raw="
+  (fm_winproc_ancestry_ppid() { fm_winproc_ppid "$1"; }; fm_harness_ancestry_pids || printf "unresolved\n")
+  printf "logical="
+  fm_harness_ancestry_pids
+'
+true
+```
+
+The direct probe and nested logical probe returned the same live Codex PID.
+The counterfactual uses only the original native parent lookup in that same nested process and returned `raw=unresolved`; restoring logical ancestry returned `logical=<current Codex PID>`.
+No exported or forced harness PID was supplied.
+The native CIM reads required execution outside the restricted sandbox on this machine; sandbox-denied CIM is not evidence of missing ancestry.
+
+`bash tests/fm-winproc-lib.test.sh` passed all assertions, including an exited native intermediary, unchanged raw kernel parent evidence, and missing logical-parent fallback.
+The final focused `bin/fm-lint.sh` run covering the changed scripts and tests passed with ShellCheck 0.11.0.
+The first five portable fake-process assertions in `bash tests/fm-session-lock-ancestry.test.sh` passed; its subsequent real orphaned POSIX process-tree test failed on Git Bash with `expected exit 2, got 0`, so that run does not establish the POSIX runtime guarantee.
+Use the token-free probe above to refresh the installed Codex result and the existing ancestry suite on a POSIX host to refresh the Unix runtime result.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

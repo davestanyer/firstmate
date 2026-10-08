@@ -144,6 +144,39 @@ OUT=$(unset CLAUDE_PID; FM_WINPROC_FORCE=1 FM_WINPROC_SELF="$SHELL_WINPID" \
 [ "$OUT" = "$HARNESS_WINPID" ] || fail "source 2 resolved the wrong pid: '$OUT'"
 pass "the Windows parent chain resolves the ancestry with no harness-exported pid"
 
+# MSYS exec replaces the Windows process while retaining its logical PID.
+# The child's native parent is gone, but its live logical parent still links
+# to the harness. Include an unrelated harness to reject process-list guessing.
+ps_fixture_exec_parent() {
+  printf '%s\n' \
+    "PID PPID PGID WINPID TTY UID STIME COMMAND" \
+    "101 100 100 $SHELL_WINPID ? 0 09:50:36 $SHELL_IMAGE" \
+    "100 1 100 $MID_WINPID ? 0 09:50:35 $SHELL_IMAGE" \
+    "4194308 0 0 9999 ? 0 09:50:34 C:\\tools\\codex.exe"
+}
+table_fixture_exec_parent() {
+  printf '%s\n' \
+    "$SHELL_WINPID 8888 $SHELL_IMAGE" \
+    "$MID_WINPID $HARNESS_WINPID $SHELL_IMAGE" \
+    "$HARNESS_WINPID 2532 $HARNESS_IMAGE" \
+    "9999 2532 C:\\tools\\codex.exe"
+}
+OUT=$(unset CLAUDE_PID; FM_WINPROC_FORCE=1 FM_WINPROC_SELF="$SHELL_WINPID" \
+  FM_WINPROC_PS_CMD=ps_fixture_exec_parent FM_WINPROC_TABLE_CMD=table_fixture_exec_parent \
+  fm_harness_ancestry_pids) || fail "MSYS exec parent did not bridge to native ancestry"
+[ "$OUT" = "$HARNESS_WINPID" ] || fail "MSYS exec parent selected wrong harness: '$OUT'"
+pass "MSYS logical ancestry survives an exited native exec intermediary"
+
+OUT=$(FM_WINPROC_FORCE=1 FM_WINPROC_PS_CMD=ps_fixture_exec_parent \
+  FM_WINPROC_TABLE_CMD=table_fixture_exec_parent fm_winproc_ppid "$SHELL_WINPID")
+[ "$OUT" = 8888 ] || fail "logical ancestry changed raw kernel parent evidence: '$OUT'"
+pass "raw native parent evidence remains unchanged by logical ancestry"
+
+OUT=$(FM_WINPROC_FORCE=1 FM_WINPROC_PS_CMD=ps_fixture_no_harness \
+  FM_WINPROC_TABLE_CMD=table_fixture_exec_parent fm_winproc_ancestry_ppid "$SHELL_WINPID")
+[ "$OUT" = 8888 ] || fail "missing logical parent must retain native fallback: '$OUT'"
+pass "missing MSYS parent falls back to native evidence without guessing"
+
 # Prove that case was not vacuous either: source 1 really is absent.
 ps_has_no_harness() {
   fm_winproc_command "$HARNESS_WINPID" >/dev/null 2>&1 && return 1
